@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snar_qc"
+version = "0.1.0"
+description = "Quantum chemistry for nucleophilic aromatic substitution (SNAr): first-principles activation free energies (delta-G-double-dagger) from transition states, plus ground-state descriptors"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Anton Zhemera", email = "anton.zhemera@gmail.com"}
+]
+
+# Core deps only. The QC / TS-search stack (autodE, xTB, Psi4) is not reliably
+# pip-installable and is pinned in environment.yml (the conda env that runs the
+# calculations).
+dependencies = [
+    "rdkit>=2023.09.1",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scipy>=1.10.0",
+    "pyarrow>=14.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.7.0",
+    "ruff>=0.0.280",
+]
+
+[project.urls]
+Homepage = "https://github.com/AntonZhemera/snar-qc"
+Repository = "https://github.com/AntonZhemera/snar-qc.git"
+Issues = "https://github.com/AntonZhemera/snar-qc/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that run a quantum-chemistry / TS-search calculation; deselect with -m 'not slow'",
+]

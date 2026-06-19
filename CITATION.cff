@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use snar-qc in your research, please cite it."
+title: "snar-qc: Quantum chemistry for SNAr reactivity (first-principles activation free energies)"
+authors:
+  - family-names: Zhemera
+    given-names: Anton
+    email: anton.zhemera@gmail.com
+    affiliation: "Taras Shevchenko National University of Kyiv"
+version: 0.1.0
+date-released: 2026-06-15
+license: Apache-2.0
+repository-code: "https://github.com/AntonZhemera/snar-qc"

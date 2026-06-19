@@ -1,0 +1,60 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+.condarc
+.mamba_env
+.mamba_env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints
+.jupyter_local
+
+# Editors / tooling
+.vscode/
+.obsidian/
+
+# Claude Code (local-only permissions and session state)
+.claude/
+
+# Data — raw / processed / external payloads are NOT tracked by default.
+# Never commit large or non-shareable data. Track only small, shareable curated
+# tables, explicitly, once a consumer artefact stabilises (git add -f or a
+# narrower un-ignore rule).
+data/raw/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+
+# Quantum-chemistry + TS-search scratch (Psi4 / ORCA / xTB / autodE)
+logs/*
+*.wfn
+*.fchk
+*.gbw
+*.molden
+*.cube
+*.opt
+*.log
+*.out
+*.xyz
+*.clean
+*.dat
+xtbopt.*
+xtbrestart.*
+autode_calculations/
+*_autode/

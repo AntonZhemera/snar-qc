@@ -1,0 +1,22 @@
+name: snar-qc
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - rdkit>=2023.09.1
+  # QC + TS-search engine
+  - xtb              # CLI
+  - xtb-python       # Python API
+  - psi4
+  - autode           # automated reaction profiles / TS search
+  # output stack (write the ΔG‡ / descriptor tables)
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - pandas>=2.0.0
+  - pyarrow>=14.0.0
+  # BLAS — OpenBLAS: the MKL threaded layer crashed savefig / lstsq / linregress
+  # on Windows; OpenBLAS is the safe default here.
+  - libblas=*=*openblas
+  - libcblas=*=*openblas
+  - liblapack=*=*openblas
+  - pip
