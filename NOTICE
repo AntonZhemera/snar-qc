@@ -1,0 +1,23 @@
+snar-qc
+Copyright 2026 Anton Zhemera
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party vendored code
+================================================================================
+
+This product bundles a verbatim copy of the "predict_snar" package from the
+predict-SNAr code release, which is available under the MIT License.
+
+  predict-SNAr (predict_snar)
+  Copyright (c) 2020 Kjell Jorner
+  Reference: Jorner, K. et al. "Organic reactivity from mechanism to machine
+             learning ..." Chem. Sci. 2021, 12, 1163-1175.
+             DOI: 10.1039/D0SC04896H
+  License:   MIT
+
+The vendored copy lives at src/predict_snar/. Its MIT license text is preserved
+at src/predict_snar/LICENSE, and provenance is recorded in
+src/predict_snar/VENDORED.md. The vendored files are unmodified; snar-qc's own
+code (src/snar_qc/) builds on top of them without editing them.

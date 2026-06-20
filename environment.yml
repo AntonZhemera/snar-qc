@@ -8,7 +8,14 @@ dependencies:
   - xtb              # CLI
   - xtb-python       # Python API
   - psi4
+  - dftd3-python     # s-dftd3 backend for Psi4 '-d3bj' dispersion (B3LYP-D3BJ)
   - autode           # automated reaction profiles / TS search
+  # vendored predict-snar (src/predict_snar) runtime deps — needed to import
+  # predict_snar.calculators (the base Calculator that Psi4Calculator subclasses)
+  - ase              # ASE Atoms geometry objects used across predict_snar
+  - cclib            # QC-output parsing in predict_snar.parsers
+  - joblib           # parallel helpers in predict_snar.calculators
+  - mendeleev        # element data in predict_snar.helpers
   # output stack (write the ΔG‡ / descriptor tables)
   - numpy>=1.24.0
   - scipy>=1.10.0
