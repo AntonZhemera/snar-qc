@@ -62,6 +62,7 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
     "reference": None,  # resolved per-calculation from multiplicity (rks / uks)
     "e_convergence": 1e-8,
     "d_convergence": 1e-8,
+    "geom_maxiter": 150,  # optking iteration cap (raised from Psi4's default 50)
 }
 
 
@@ -232,6 +233,11 @@ class Psi4Calculator(Calculator):
                 "d_convergence": self.options["d_convergence"],
             }
         )
+
+        # Raise optking's iteration cap on any optimisation (Psi4 defaults to 50,
+        # which is short for floppy or strained geometries).
+        if do_opt and self.options.get("geom_maxiter"):
+            psi4.set_options({"geom_maxiter": int(self.options["geom_maxiter"])})
 
         # Transition-state optimisation: optking's OPT_TYPE=TS, building a Hessian.
         # Only on the opt path; the normal MIN opt is left untouched.
