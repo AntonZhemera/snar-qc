@@ -9,4 +9,12 @@ The first engine is :class:`snar_qc.qc.psi4_calculator.Psi4Calculator`, a Psi4
 (Python-API) drop-in for predict-snar's Gaussian-16 ``G16Calculator``. It is imported
 explicitly (``from snar_qc.qc.psi4_calculator import Psi4Calculator``) rather than re-
 exported here, so that importing this subpackage does not pull in Psi4 / predict_snar.
+
+The same explicit-import convention applies to the other public names:
+
+- :class:`snar_qc.qc.bond_orders.Psi4BondOrders` -- bond orders from a wavefunction.
+- :mod:`snar_qc.qc.thermo` -- quasi-harmonic free energies and activation barriers:
+  ``grimme_qh_gibbs`` (Grimme qRRHO Gibbs free energy), ``Psi4Thermo`` (per-species
+  thermochemistry, ``from_calculator``), and ``activation_free_energy`` (ΔG‡ in
+  kcal/mol). ``thermo`` pulls in ``predict_snar`` for its unit constant but not Psi4.
 """
