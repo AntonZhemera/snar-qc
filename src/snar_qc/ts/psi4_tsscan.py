@@ -36,7 +36,11 @@ method string and PCM solvation is out of Stage 2 scope. They are kept on
 from __future__ import annotations
 
 import os
+import re
+import shutil
 from typing import TYPE_CHECKING, Any
+
+import ase.io
 
 from predict_snar.calculators import TSScan
 from predict_snar.data import HARTREE_TO_KCAL
@@ -93,6 +97,75 @@ class Psi4TSScan(TSScan):
         # the place of the Gaussian sps/*.log files in the synchronous Psi4 flow.
         self._sp_energies: list[float] = []
         self._sp_wavefunctions: list[Any] = []
+
+    # xtb energies live in each scan frame's comment line: ``energy: <Eh> xtb: ...``.
+    _SCAN_ENERGY_RE = re.compile(r"energy:\s*(-?\d+\.\d+)")
+
+    def read_scan_output(self) -> None:
+        """Read the xTB relaxed-scan geometries and energies (xtb-6.7.1 compatible).
+
+        Overrides ``TSScan.read_scan_output``, which builds a ``predict_snar.parsers.
+        XTBParser`` over ``xtb.out`` to recover the scan energies. That parser also
+        scrapes the Wiberg-bond-order block, keyed on an output header
+        (``"total WBO ... WBO to atom ..."``) that **xTB 6.7.1 no longer prints** (the
+        block is now headed ``"largest (>0.10) Wiberg bond orders for each atom"``), so
+        the parser leaves its ``bo_matrix`` unbound and raises ``UnboundLocalError``
+        before returning any energy. The bond orders it would compute are unused on the
+        Psi4 path anyway -- peak validation uses Psi4 Mayer orders (:meth:`read_sp_
+        output`).
+
+        This override sidesteps the parser entirely: it reads the geometries from the
+        scan trajectory and the per-frame energy straight from each frame's comment line
+        (xTB writes ``energy: <Eh>`` there), referencing energies to the first point in
+        kcal/mol exactly as the base method does. The HOMO-LUMO gaps the base method
+        also collected are not needed by the POC runner (which never calls
+        :meth:`check_electronic_temperature`), so ``hl_gaps`` is left empty.
+        """
+        if os.path.isfile("xtbscan.log"):
+            shutil.move("xtbscan.log", "scan.xyz")
+
+        self.geometries = list(ase.io.iread("scan.xyz"))
+        for geometry in self.geometries:
+            geometry.info["charge"] = self.atoms.info["charge"]
+
+        energies = self._read_scan_energies("scan.xyz")
+        self.xtb_energies = [
+            (energy - energies[0]) * HARTREE_TO_KCAL for energy in energies
+        ]
+        self.hl_gaps = []
+
+    @classmethod
+    def _read_scan_energies(cls, path: str) -> list[float]:
+        """Extract per-frame energies (Hartree) from an xTB scan xyz trajectory.
+
+        Each frame in an xTB scan trajectory has a comment line of the form
+        ``energy: -38.160514552507 xtb: 6.7.1 (...)``; this pulls the float out of the
+        comment line of every frame (the line after each atom-count line).
+
+        Args:
+            path: Path to the scan trajectory (``scan.xyz``).
+
+        Returns:
+            The per-frame energies in Hartree, in trajectory order.
+
+        Raises:
+            ValueError: If a frame's comment line carries no parseable energy.
+        """
+        energies: list[float] = []
+        with open(path) as handle:
+            lines = handle.readlines()
+        index = 0
+        while index < len(lines):
+            n_atoms = int(lines[index].strip())
+            comment = lines[index + 1]
+            match = cls._SCAN_ENERGY_RE.search(comment)
+            if match is None:
+                raise ValueError(
+                    f"No energy in scan-frame comment line: {comment.strip()!r}"
+                )
+            energies.append(float(match.group(1)))
+            index += n_atoms + 2
+        return energies
 
     def run_sps(self, n_procs: int, mem: float) -> None:
         """Run a synchronous Psi4 single point for each scan geometry.

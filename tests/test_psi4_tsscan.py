@@ -15,6 +15,7 @@ from ase import Atoms
 
 import predict_snar.config as predict_snar_config
 from predict_snar.calculators import XTBCalculator
+from predict_snar.data import HARTREE_TO_KCAL
 from snar_qc.qc.psi4_calculator import Psi4Calculator
 from snar_qc.ts.psi4_tsscan import Psi4TSScan
 
@@ -48,6 +49,46 @@ def test_init_swaps_dft_calculator(monkeypatch):
     # xTB scan reused unchanged; reactive atoms wired identically to the base.
     assert isinstance(scan.xtb, XTBCalculator)
     assert (scan.central_atom, scan.nu_atom, scan.lg_atom) == (1, 2, 2)
+
+
+def test_read_scan_output_parses_frame_energies(tmp_path, monkeypatch):
+    """read_scan_output reads geometries + per-frame energies without XTBParser.
+
+    The override exists because xTB 6.7.1 renamed the Wiberg-bond-order header the
+    vendored ``XTBParser`` keys on, so the base ``read_scan_output`` raises before
+    returning any energy. This feeds a tiny three-frame scan trajectory (the xTB
+    ``energy: <Eh>`` comment-line convention) and checks the geometries, the charge
+    propagation, and the first-point-referenced kcal/mol energies.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        predict_snar_config, "general_info", {"azide_nucleophile": False}
+    )
+
+    # Three N2 frames with xTB-style energy comments, written as scan.xyz directly.
+    energies_hartree = [-109.50, -109.40, -109.30]
+    distances = [1.05, 1.10, 1.20]
+    lines = []
+    for energy, dist in zip(energies_hartree, distances):
+        lines.append("2")
+        lines.append(f"energy: {energy:.6f} xtb: 6.7.1 (test)")
+        lines.append("N 0.0 0.0 0.0")
+        lines.append(f"N 0.0 0.0 {dist}")
+    (tmp_path / "scan.xyz").write_text("\n".join(lines) + "\n")
+
+    scan = Psi4TSScan(
+        _n2(1.10), xtb_options={}, dft_options={}, general_options=_GENERAL_OPTIONS
+    )
+    scan.read_scan_output()
+
+    assert len(scan.geometries) == 3
+    # Charge propagated from the reaction-complex atoms onto every frame.
+    assert all(geom.info["charge"] == 0 for geom in scan.geometries)
+    # Energies referenced to the first frame, converted Hartree -> kcal/mol.
+    assert scan.xtb_energies[0] == 0.0
+    expected = (energies_hartree[1] - energies_hartree[0]) * HARTREE_TO_KCAL
+    assert scan.xtb_energies[1] == pytest.approx(expected)
+    assert scan.hl_gaps == []
 
 
 @pytest.mark.slow
