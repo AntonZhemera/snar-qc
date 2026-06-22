@@ -290,9 +290,9 @@ def calculation_monitor(calculator, errors=True, dissociate=False, gic=False, di
 
                 # Run dissociation check
                 if has_dissociated(calculator.output):
-                    # Kill job group. os.killpg/os.getpgid are POSIX-only; on
-                    # Windows (no process groups here) fall back to terminating
-                    # the process directly.
+                    # Kill job group. snar-qc: Windows portability —
+                    # os.killpg/os.getpgid are POSIX-only; on Windows (no process
+                    # groups here) fall back to terminating the process directly.
                     if hasattr(os, "killpg"):
                         os.killpg(os.getpgid(calculator.process.pid), signal.SIGTERM)
                     else:

@@ -19,5 +19,7 @@ predict-SNAr code release, which is available under the MIT License.
 
 The vendored copy lives at src/predict_snar/. Its MIT license text is preserved
 at src/predict_snar/LICENSE, and provenance is recorded in
-src/predict_snar/VENDORED.md. The vendored files are unmodified; snar-qc's own
-code (src/snar_qc/) builds on top of them without editing them.
+src/predict_snar/VENDORED.md. The package was vendored verbatim, then minimally
+patched for Windows portability (two files: calculators.py, helpers.py); the
+exact changes are listed under "Local modifications" in src/predict_snar/VENDORED.md.
+snar-qc's own code (src/snar_qc/) builds on top of the package.
