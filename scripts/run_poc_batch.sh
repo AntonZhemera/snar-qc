@@ -16,6 +16,11 @@
 # SOLVENT (default empty = gas phase, e.g. SOLVENT=DMSO), COORDINATE (default concerted).
 set -euo pipefail
 
+# Force Python UTF-8 mode so the runner's "ΔG‡" prints/writes don't die on
+# Windows' cp1252 default text encoding (UnicodeEncodeError on 'Δ').
+# Harmless on Linux/macOS, where UTF-8 is already the default.
+export PYTHONUTF8=1
+
 SLICE="${1:-data/external/lu74_poc_slice.csv}"
 OUTDIR="${2:-data/processed/poc_run}"
 N_WORKERS="${N_WORKERS:-5}"

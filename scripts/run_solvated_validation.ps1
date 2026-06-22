@@ -37,6 +37,13 @@ $ErrorActionPreference = "Stop"
 $Here = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Here
 
+# Force Python UTF-8 mode. On Windows, Python's default text encoding is cp1252
+# ('charmap'), which cannot encode the Δ in "ΔG‡" that the runner prints/writes,
+# so every substrate dies with UnicodeEncodeError. UTF-8 mode matches Linux and
+# fixes stdout/stderr plus the default open() encoding. Inherited by both the
+# bash batch below and the validate_poc.py call further down.
+$env:PYTHONUTF8 = "1"
+
 # run_poc_batch.sh reads these as environment variables.
 $env:SOLVENT    = $Solvent
 $env:COORDINATE = $Coordinate
