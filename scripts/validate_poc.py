@@ -116,6 +116,28 @@ def compute_stats(join: pd.DataFrame, column: str = "delta_g_qh_kcal") -> dict:
             "exp_range_kcal": [round(float(exp.min()), 2), round(float(exp.max()), 2)],
         }
     )
+
+    # Per-leaving-group breakdown: the headline pooled correlation can be dragged
+    # down by a leaving-group-dependent offset (e.g. gas-phase C-F cleavage is
+    # over-penalised), so report each family separately too.
+    by_group: dict = {}
+    for group, sub in ok.groupby("leaving_group"):
+        if len(sub) < 3:
+            by_group[str(group)] = {"n": int(len(sub)), "note": "too few for r"}
+            continue
+        ge = sub["exp_dg_kcal"].to_numpy()
+        gc = sub[column].to_numpy()
+        goff = float(np.mean(gc - ge))
+        by_group[str(group)] = {
+            "n": int(len(sub)),
+            "spearman_r": round(float(spearmanr(gc, ge).statistic), 4),
+            "pearson_r": round(float(pearsonr(gc, ge)[0]), 4),
+            "mean_offset_kcal": round(goff, 3),
+            "mae_offset_corrected_kcal": round(
+                float(np.mean(np.abs((gc - goff) - ge))), 3
+            ),
+        }
+    stats["by_leaving_group"] = by_group
     return stats
 
 
@@ -125,7 +147,17 @@ def make_scatter(join: pd.DataFrame, stats: dict, out_png: Path, column: str) ->
     fig, ax = plt.subplots(figsize=(5.2, 5.0))
     exp = ok["exp_dg_kcal"].to_numpy()
     comp = ok[column].to_numpy()
-    ax.scatter(exp, comp, c="#2c7fb8", s=60, zorder=3)
+    # Colour by leaving group -- the leaving-group-dependent offset is the headline.
+    palette = {"Cl": "#2c7fb8", "F": "#d95f0e", "Br": "#31a354"}
+    for group, sub in ok.groupby("leaving_group"):
+        ax.scatter(
+            sub["exp_dg_kcal"],
+            sub[column],
+            c=palette.get(str(group), "#666666"),
+            s=60,
+            zorder=3,
+            label=f"{group} (n={len(sub)})",
+        )
     for _, row in ok.iterrows():
         ax.annotate(
             str(int(row["lu_id"])),
@@ -140,7 +172,7 @@ def make_scatter(join: pd.DataFrame, stats: dict, out_png: Path, column: str) ->
         # Best-fit line (rank/linear trend) and a parity guide shifted by the offset.
         slope, intercept = np.polyfit(exp, comp, 1)
         xs = np.array([exp.min() - 1, exp.max() + 1])
-        ax.plot(xs, slope * xs + intercept, "-", c="#d95f0e", lw=1.5, label="best fit")
+        ax.plot(xs, slope * xs + intercept, "-", c="black", lw=1.2, label="best fit")
         offset = stats.get("mean_offset_kcal", 0.0)
         ax.plot(
             [lo, hi],

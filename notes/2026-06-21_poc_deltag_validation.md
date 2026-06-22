@@ -1,7 +1,7 @@
 # 2026-06-21 — First-principles ΔG‡ POC vs the Lu reactivity set (go/no-go)
 
-**Status:** DRAFT — methodology and engine validation complete; the 10-substrate
-validation table and the go/no-go verdict are filled in once the batch finishes.
+**Status:** complete — engine validated end to end on 11/11 substrates (every one a
+confirmed saddle); 10-substrate validation and the go/no-go verdict are below.
 
 End-to-end proof of concept for computing S~N~Ar activation free energies (ΔG‡) directly
 from transition-state quantum chemistry, validated against the Lu, Paci & Leitch
@@ -49,9 +49,10 @@ activation free energy for the reaction with **methylamine** as a model nucleoph
 
 ## Reference choice (decided here)
 
-The clean choice for a *unimolecular* step is a reaction-complex reference (aryl halide
-+ amine as one supermolecule), which cancels the gas-phase standard-state term. In
-practice the gas-phase pre-association complex is a **floppy, orientation-dependent
+The clean choice for a *unimolecular* step is a reaction-complex reference 
+**(aryl halide + amine as one supermolecule)**, 
+which cancels the gas-phase standard-state term. In practice the gas-phase 
+pre-association complex is a **floppy, orientation-dependent
 van-der-Waals minimum on a flat surface that does not converge** — the optimisation
 failed even after the (expensive) TS search. The **separated-reactants** reference
 [G(ArX) + G(amine)] is used instead because:
@@ -79,7 +80,46 @@ solution-phase experiment — expected and irrelevant to the ranking question.
 
 ## Results — 10 Lu substrates (F & Cl leaving groups)
 
-<!-- RESULTS-PENDING: filled from data/processed/poc_run after the batch completes -->
+All 11 runs (10 validation substrates + the smoke test) located a genuine transition
+state — **exactly one imaginary mode each, 100 % convergence** — with the concerted-scan
+peak as the saddle seed and `geom_maxiter` raised to 150. Wall time 2.3–8.4 h/substrate
+(the finite-difference TS Hessian dominates).
+
+| lu_id | LG | exp ΔG‡ | comp ΔG‡(qh) | comp ΔE‡ | offset (ΔG‡) |
+|---:|:--:|---:|---:|---:|---:|
+| 17 | Cl | 15.3 | 25.3 | 11.3 | +10.0 |
+| 22 | Cl | 16.9 | 28.3 | 14.4 | +11.4 |
+| 66 | **F** | 17.4 | 42.6 | 28.8 | **+25.2** |
+| 27 | Cl | 17.5 | 29.5 | 16.0 | +12.0 |
+| 31 | Cl | 17.9 | 28.6 | 15.1 | +10.7 |
+| 72 | **F** | 19.6 | 47.4 | 33.0 | **+27.8** |
+| 48 | Cl | 19.7 | 30.3 | 16.7 | +10.6 |
+| 57 | Cl | 21.3 | 33.2 | 19.9 | +11.9 |
+| 74 | **F** | 21.8 | 47.7 | 33.9 | **+25.9** |
+| 65 | Cl | 22.9 | 36.3 | 23.3 | +13.4 |
+
+All energies kcal/mol. Correlation of computed ΔG‡(qh) against experiment:
+
+| Set | n | Spearman ρ | Pearson r | mean offset | offset-corrected MAE |
+|:--|:--:|--:|--:|--:|--:|
+| **all** | 10 | 0.66 (p=0.04) | 0.52 | +15.9 | 6.24 |
+| **Cl only** | 7 | **0.96** | **0.98** (R²=0.95) | +11.5 | **0.88** |
+| **F only** | 3 | **1.00** | 0.90 | +26.3 | 0.96 |
+
+Two clear signals:
+
+1. **Within a leaving-group family the computed ordering is excellent.** Cl (n=7)
+   reproduces the experimental rank almost perfectly (ρ=0.96, R²=0.95 — above the
+   aspirational predict-SNAr R²=0.93) with an offset-corrected MAE of **0.88 kcal/mol**;
+   the three F substrates are correctly ordered (ρ=1.0). The direct ΔG‡ does track
+   substrate activation.
+2. **The offset is leaving-group-dependent**, so the *pooled* correlation collapses to
+   ρ=0.66. F substrates sit ~15 kcal/mol above the Cl trend (offset +26 vs +11) because
+   the concerted gas-phase coordinate forces full C–F cleavage in the TS, which is very
+   costly without solvent/H-bond stabilisation of the developing fluoride — whereas in
+   solution F is a competent S~N~Ar leaving group (the addition step, not C–F cleavage,
+   is rate-limiting). This is the expected gas-phase / no-PCM artefact, concentrated on
+   fluoride.
 
 _Validation slice: `data/external/lu74_poc_slice.csv` (10 substrates spanning the
 published 15.3–22.9 kcal/mol range, 7 Cl + 3 F leaving groups). Computed values and the
@@ -89,7 +129,36 @@ join: `notes/assets/poc_validation_join.csv`; statistics:
 
 ## Go / no-go
 
-<!-- RESULTS-PENDING -->
+**Qualified GO — scale the direct ΔG‡ engine as a within-leaving-group ranker; add
+solvation before pooling across leaving groups or trusting absolute magnitudes.**
+
+What the POC establishes:
+
+- The end-to-end machinery is sound and reliable: SMILES → docked complex → concerted
+  relaxed scan → DFT profile + Mayer-bond-order peak validation → optking TS saddle →
+  qRRHO ΔG‡, **11/11 confirmed saddles, no hand-holding**.
+- The computed barrier **carries real reactivity information**: within a leaving-group
+  family it reproduces the published ranking at R² ≈ 0.95 and offset-corrected MAE < 1
+  kcal/mol — already good enough to **label substrates the empirical six-ring model
+  cannot reach** (e.g. five-membered heterocycles), provided labels are used *within*
+  a leaving-group family or after an offset calibration.
+
+What it does *not* yet support, and the conditions to lift them:
+
+- **Cross-leaving-group pooling and absolute magnitudes need solvation.** The
+  leaving-group-dependent offset (fluoride over-penalised by ~15 kcal/mol) is a direct
+  consequence of the gas-phase, no-PCM path. **Add PCM/SMD** (already the next deferred
+  item) before mixing F/Cl/Br or comparing to experiment in absolute terms.
+- **Consider the addition (Meisenheimer) coordinate once solvation is in.** With solvent
+  stabilising the developing charge, the stepwise addition TS becomes well-defined and
+  is the experimentally rate-limiting step for many activated arenes; the gas-phase POC
+  had to use the concerted coordinate precisely because the zwitterionic adduct is not a
+  gas-phase minimum.
+- **Nucleophile.** A neutral model amine was a deliberate, validated stand-in for Lu's
+  alkoxide; revisit once solvation allows the anionic nucleophile to be modelled.
+
+Net: the approach is validated and worth scaling; the immediate next investment is
+PCM/SMD on the Psi4 path, after which a cross-leaving-group re-validation is warranted.
 
 ## Reproduce
 
