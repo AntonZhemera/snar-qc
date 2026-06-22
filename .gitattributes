@@ -1,0 +1,11 @@
+# Normalize line endings. Without this, core.autocrlf=true rewrites shell
+# scripts to CRLF on checkout and bash chokes on `\r` (e.g. `set -o pipefail`).
+* text=auto
+
+# Shell scripts MUST stay LF on every platform, or Git Bash / WSL break.
+*.sh   text eol=lf
+
+# Windows-native scripts stay CRLF.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
