@@ -49,8 +49,30 @@ Write-Host "slice=$Slice outdir=$OutDir solvent=$Solvent coordinate=$Coordinate"
 Write-Host "workers=$NWorkers threads=$Threads mem_gb=$MemGb"
 
 # 1. compute (resumable; PCM solvation on via SOLVENT). The batch is a shell script,
-#    so route it through bash (Git Bash / WSL must be on PATH).
-bash scripts/run_poc_batch.sh $Slice $OutDir
+#    so route it through Git Bash.
+#
+#    NB: a bare `bash` on Windows usually resolves to WSL's C:\Windows\System32\bash.exe,
+#    which runs a *separate* Linux environment: it neither sees the conda env's `python`
+#    nor inherits the SOLVENT/N_WORKERS/THREADS/MEM_GB vars set above. Git Bash inherits
+#    both, so we locate it explicitly (relative to git on PATH, then well-known paths).
+$bash = $null
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd) {
+    $gitRoot = Split-Path -Parent (Split-Path -Parent $gitCmd.Source)
+    foreach ($c in @("$gitRoot\bin\bash.exe", "$gitRoot\usr\bin\bash.exe")) {
+        if (Test-Path $c) { $bash = $c; break }
+    }
+}
+if (-not $bash) {
+    foreach ($c in @("C:\Program Files\Git\bin\bash.exe", "C:\Program Files (x86)\Git\bin\bash.exe")) {
+        if (Test-Path $c) { $bash = $c; break }
+    }
+}
+if (-not $bash) {
+    throw "Git Bash not found. Install Git for Windows, or run scripts/run_poc_batch.sh from a bash shell."
+}
+
+& $bash scripts/run_poc_batch.sh $Slice $OutDir
 if ($LASTEXITCODE -ne 0) { throw "run_poc_batch.sh failed (exit $LASTEXITCODE)" }
 
 # 2. validate (correlation, per-leaving-group breakdown, scatter).
