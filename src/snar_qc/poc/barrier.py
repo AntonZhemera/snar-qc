@@ -16,6 +16,13 @@ This is the Stage 4 glue that wires the Stage 1-3 pieces into one substrate run:
 5. **ΔG‡** -- ``activation_free_energy`` of the TS against that reference, on the Grimme
    quasi-harmonic Gibbs free energy.
 
+Solvation and coordinate (added for the cross-leaving-group re-validation). A ``solvent``
+argument switches the whole chain (scan DFT single points, TS opt+freq, both reference
+opt+freqs) onto the Psi4 PCM implicit-solvation path; ``None`` keeps it gas phase. A
+``coordinate`` argument selects the relaxed-scan coordinate: ``"concerted"`` (the
+gas-phase-validated antisymmetric d(C-Nu) - d(C-LG) scan) or ``"addition"`` (scan only
+the forming C...Nu bond). The choice is recorded on the result and never auto-switched.
+
 Reference choice (decided in Stage 4a). The first attempt used a *reaction-complex*
 reference -- a single supermolecule of aryl halide + amine, so the step would be
 unimolecular and the standard-state term would cancel. In the gas phase that
@@ -139,6 +146,8 @@ class BarrierResult:
     arx_gibbs_qh_hartree: Optional[float] = None
     amine_gibbs_qh_hartree: Optional[float] = None
     reference: str = "separated_reactants"
+    coordinate: str = "concerted"
+    solvent: Optional[str] = None
     peak_index: Optional[int] = None
     n_scan_points: Optional[int] = None
     scan_dft_energies_kcal: list[float] = field(default_factory=list)
@@ -173,7 +182,7 @@ def _configure_engine() -> None:
 
 
 def _species_thermo(
-    atoms: Any, file: str, n_procs: int, mem: float
+    atoms: Any, file: str, n_procs: int, mem: float, solvent: Optional[str] = None
 ) -> tuple[Psi4Thermo, int, float, float]:
     """Optimise + frequency-analyse a reference species and bundle its thermochemistry.
 
@@ -182,11 +191,13 @@ def _species_thermo(
         file: Psi4 output-file base name.
         n_procs: Threads for the Psi4 calculation.
         mem: Memory budget (GB).
+        solvent: Optional PCMSolver solvent name; ``None`` runs the species in gas phase.
 
     Returns:
         ``(thermo, n_imaginary, electronic_energy_hartree, gibbs_qh_hartree)``.
     """
-    calc = Psi4Calculator(atoms, file=file)
+    options = {"solvent": solvent} if solvent else None
+    calc = Psi4Calculator(atoms, file=file, options=options)
     calc.opt_freq(n_procs=n_procs, mem=mem)
     thermo = Psi4Thermo.from_calculator(calc)
     return thermo, count_imaginary(calc.frequencies), calc.energy, thermo.gibbs_qh
@@ -202,6 +213,8 @@ def compute_barrier(
     mem: float = 12.0,
     make_plot: bool = True,
     lu_id: Optional[int] = None,
+    solvent: Optional[str] = None,
+    coordinate: str = "concerted",
 ) -> BarrierResult:
     """Compute ΔG‡ for one reaction complex, returning a status-carrying result.
 
@@ -213,12 +226,23 @@ def compute_barrier(
     Args:
         rc: The reaction complex to run (carries geometry, charge, reactive indices).
         scan_stop: Final C...N (forming-bond) distance (Angstrom) for the scan.
-        scan_stop_lg: Final C-LG (breaking-bond) distance (Angstrom) for the scan.
-        scan_steps: Number of relaxed-scan steps (both bonds move concertedly).
+        scan_stop_lg: Final C-LG (breaking-bond) distance (Angstrom) for the scan, used
+            only by the ``concerted`` coordinate.
+        scan_steps: Number of relaxed-scan steps.
         n_procs: Threads handed to each Psi4 calculation.
         mem: Memory budget (GB) per Psi4 calculation.
         make_plot: Whether to write the engine's scan plot (``GSM.png``).
         lu_id: Optional Lu_74 identifier, copied onto the result.
+        solvent: Optional PCMSolver solvent name (e.g. ``"DMSO"``). When set, the scan
+            DFT single points, the TS opt+freq, and both reference opt+freqs all run with
+            the PCM implicit-solvation path; ``None`` keeps the whole chain gas phase.
+        coordinate: Reaction coordinate for the relaxed scan. ``"concerted"`` (default)
+            drives the antisymmetric d(C-Nu) - d(C-LG) coordinate (Nu in *and* LG out),
+            the gas-phase-validated path. ``"addition"`` scans only the forming C...Nu
+            bond, leaving C-LG intact -- the stepwise-addition coordinate, which has no
+            gas-phase saddle but can acquire one once solvent stabilises the developing
+            Meisenheimer charge. The choice is recorded on the result; this never
+            silently switches paths.
 
     Returns:
         A :class:`BarrierResult`; ``status == "completed"`` only for a confirmed saddle.
@@ -231,7 +255,15 @@ def compute_barrier(
         nu_atom=rc.nu_atom,
         lg_atom=rc.lg_atom,
         lu_id=lu_id,
+        solvent=solvent,
+        coordinate=coordinate,
     )
+    if coordinate not in ("concerted", "addition"):
+        result.status = "error"
+        result.error = (
+            f"Unknown coordinate {coordinate!r}; expected 'concerted' or 'addition'."
+        )
+        return result
 
     try:
         _configure_engine()
@@ -241,22 +273,26 @@ def compute_barrier(
             "lg_atom": rc.lg_atom,
         }
 
-        # --- 1. concerted relaxed scan: form C...Nu while breaking C-LG --------
+        # --- 1. relaxed scan along the chosen reaction coordinate --------------
         result.stage = "scan"
         t0 = time.time()
-        scan = Psi4TSScan(rc.atoms, {}, {}, general_options)
+        scan = Psi4TSScan(rc.atoms, {}, {}, general_options, solvent=solvent)
         start_nu = float(rc.atoms.get_distance(rc.central_atom - 1, rc.nu_atom - 1))
-        start_lg = float(rc.atoms.get_distance(rc.central_atom - 1, rc.lg_atom - 1))
-        # Two constraints + two scans; xTB's default concerted mode advances both bonds
-        # together, tracing the antisymmetric d(C-Nu) - d(C-LG) coordinate.
+        # The forming C...Nu bond is always scanned inwards.
         scan.constrain_bond(rc.central_atom, rc.nu_atom, "auto")
-        scan.constrain_bond(rc.central_atom, rc.lg_atom, "auto")
         scan.add_scan(
             rc.central_atom, rc.nu_atom, "auto", start_nu, scan_stop, scan_steps
         )
-        scan.add_scan(
-            rc.central_atom, rc.lg_atom, "auto", start_lg, scan_stop_lg, scan_steps
-        )
+        if coordinate == "concerted":
+            # Second constraint + scan; xTB advances both bonds together, tracing the
+            # antisymmetric d(C-Nu) - d(C-LG) coordinate (Nu in while LG out).
+            start_lg = float(rc.atoms.get_distance(rc.central_atom - 1, rc.lg_atom - 1))
+            scan.constrain_bond(rc.central_atom, rc.lg_atom, "auto")
+            scan.add_scan(
+                rc.central_atom, rc.lg_atom, "auto", start_lg, scan_stop_lg, scan_steps
+            )
+        # else "addition": only the forming bond is driven; C-LG stays intact and
+        # relaxes. No gas-phase saddle, but a solvated one is possible (see docstring).
         scan.run_scan(n_procs=2).wait()
         scan.read_scan_output()
         result.timing_s["scan_xtb"] = time.time() - t0
@@ -289,7 +325,8 @@ def compute_barrier(
         t0 = time.time()
         ts_guess = scan.geometries[peak_index].copy()
         ts_guess.info["charge"] = rc.atoms.info["charge"]
-        ts_calc = Psi4Calculator(ts_guess, file="ts.in")
+        ts_options = {"solvent": solvent} if solvent else None
+        ts_calc = Psi4Calculator(ts_guess, file="ts.in", options=ts_options)
         ts_calc.ts_freq(n_procs=n_procs, mem=mem)
         result.timing_s["ts_opt_freq"] = time.time() - t0
 
@@ -308,7 +345,7 @@ def compute_barrier(
         t0 = time.time()
         arx_atoms = build_molecule(rc.aryl_halide_smiles)
         arx_thermo, n_imag_arx, arx_e, arx_gqh = _species_thermo(
-            arx_atoms, "arx.in", n_procs, mem
+            arx_atoms, "arx.in", n_procs, mem, solvent=solvent
         )
         result.timing_s["arx_opt_freq"] = time.time() - t0
         result.n_imag_arx = n_imag_arx
@@ -319,7 +356,7 @@ def compute_barrier(
         t0 = time.time()
         amine_atoms = build_molecule(rc.amine_smiles)
         amine_thermo, n_imag_amine, amine_e, amine_gqh = _species_thermo(
-            amine_atoms, "amine.in", n_procs, mem
+            amine_atoms, "amine.in", n_procs, mem, solvent=solvent
         )
         result.timing_s["amine_opt_freq"] = time.time() - t0
         result.n_imag_amine = n_imag_amine

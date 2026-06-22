@@ -12,7 +12,8 @@
 #   conda run -n snar-qc bash scripts/run_poc_batch.sh \
 #       data/external/lu74_poc_slice.csv data/processed/poc_run
 #
-# Env overrides: N_WORKERS (default 5), THREADS (default 3), MEM_GB (default 6).
+# Env overrides: N_WORKERS (default 5), THREADS (default 3), MEM_GB (default 6),
+# SOLVENT (default empty = gas phase, e.g. SOLVENT=DMSO), COORDINATE (default concerted).
 set -euo pipefail
 
 SLICE="${1:-data/external/lu74_poc_slice.csv}"
@@ -20,13 +21,19 @@ OUTDIR="${2:-data/processed/poc_run}"
 N_WORKERS="${N_WORKERS:-5}"
 THREADS="${THREADS:-3}"
 MEM_GB="${MEM_GB:-6}"
+SOLVENT="${SOLVENT:-}"
+COORDINATE="${COORDINATE:-concerted}"
+
+# Optional --solvent flag, only when SOLVENT is non-empty.
+SOLVENT_ARGS=()
+[ -n "$SOLVENT" ] && SOLVENT_ARGS=(--solvent "$SOLVENT")
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
 # Read the lu_id column (skip header) and round-robin into N_WORKERS buckets.
 mapfile -t IDS < <(tail -n +2 "$SLICE" | cut -d, -f1)
-echo "Batch: ${#IDS[@]} substrates, ${N_WORKERS} workers x ${THREADS} threads, outdir=${OUTDIR}"
+echo "Batch: ${#IDS[@]} substrates, ${N_WORKERS} workers x ${THREADS} threads, solvent=${SOLVENT:-gas}, coordinate=${COORDINATE}, outdir=${OUTDIR}"
 
 declare -a BUCKETS
 for i in "${!IDS[@]}"; do
@@ -43,7 +50,8 @@ for w in "${!BUCKETS[@]}"; do
     echo "  worker ${w}: lu_ids=${only} -> ${log}"
     OMP_NUM_THREADS="$THREADS" python -u scripts/run_poc.py \
         --substrates "$SLICE" --only "$only" --outdir "$OUTDIR" \
-        --n-procs "$THREADS" --mem "$MEM_GB" --retry \
+        --n-procs "$THREADS" --mem "$MEM_GB" --coordinate "$COORDINATE" \
+        "${SOLVENT_ARGS[@]}" --retry \
         >"$log" 2>&1 &
     pids+=("$!")
 done

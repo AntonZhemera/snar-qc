@@ -133,6 +133,8 @@ def _run_one(row: dict, args: argparse.Namespace) -> dict:
             n_procs=args.n_procs,
             mem=args.mem,
             lu_id=lu_id,
+            solvent=args.solvent,
+            coordinate=args.coordinate,
         )
     finally:
         os.chdir(cwd)
@@ -167,6 +169,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--scan-stop-lg", type=float, default=2.6)
     parser.add_argument("--approach", type=float, default=3.0)
     parser.add_argument(
+        "--solvent",
+        default=None,
+        help="PCMSolver solvent name for implicit solvation (e.g. DMSO); "
+        "omit for gas phase",
+    )
+    parser.add_argument(
+        "--coordinate",
+        choices=("concerted", "addition"),
+        default="concerted",
+        help="relaxed-scan coordinate: concerted d(C-Nu)-d(C-LG) (default) or "
+        "addition-only C...Nu",
+    )
+    parser.add_argument(
         "--retry", action="store_true", help="re-run substrates that did not complete"
     )
     parser.add_argument(
@@ -177,7 +192,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     rows = _load_substrates(args)
     Path(args.outdir).mkdir(parents=True, exist_ok=True)
     print(
-        f"POC runner: {len(rows)} substrate(s), amine={args.amine}, outdir={args.outdir}"
+        f"POC runner: {len(rows)} substrate(s), amine={args.amine}, "
+        f"solvent={args.solvent or 'gas'}, coordinate={args.coordinate}, "
+        f"outdir={args.outdir}"
     )
 
     summary = []
