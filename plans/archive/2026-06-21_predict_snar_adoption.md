@@ -1,7 +1,9 @@
 # Plan — Adopt predict-SNAr and swap its QC engine to Psi4 (ΔG‡ PoC)
 
 **Date:** 2026-06-21
-**Status:** active (Stage 1 in progress / landing)
+**Status:** complete / archived 2026-06-22 — Stages 1–4 landed and the ΔG‡ POC closed
+with a qualified GO (see `notes/2026-06-21_poc_deltag_validation.md`). Solvation follow-up
+continues under `plans/2026-06-22_solvation_revalidation.md`.
 **Scope owner:** snar-qc
 
 ## Goal
