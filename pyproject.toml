@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snar_qc"
-version = "0.1.0"
+version = "0.2.0"
 description = "Quantum chemistry for nucleophilic aromatic substitution (SNAr): first-principles activation free energies (delta-G-double-dagger) from transition states, plus ground-state descriptors"
 readme = "README.md"
 requires-python = ">=3.10"
