@@ -18,6 +18,11 @@ conda activate gpuqc      # gpu4pyscf-cuda12x 1.7.3 / pyscf 2.13.1 / cutensor ac
 The `gpuqc` env already has the NVIDIA component wheels and an `activate.d` hook that puts
 the cuTENSOR/cuBLAS lib dirs on `LD_LIBRARY_PATH`. Psi4 stays in the existing `snar-qc` env.
 
+**Non-GPU hosts (Windows workstation, CI, CPU-only dev machines):** nothing to install — the
+default backend is Psi4 and gpu4pyscf/cupy are an optional `[gpu]` extra, never imported unless
+the GPU backend is explicitly selected. The CPU-fallback tests run without a GPU; GPU-only tests
+self-skip when no CUDA device is present. See the masterplan **CPU-fallback contract**.
+
 Acceptance for every stage:
 
 1. New stage tests pass.

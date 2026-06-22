@@ -44,7 +44,7 @@ by config/env (`SNAR_QC_BACKEND=psi4|gpu4pyscf`); **Psi4 stays the default and f
 ## Cross-cutting decisions
 
 - **Psi4 default; GPU opt-in.** Backend selection must degrade gracefully and fall back to
-  Psi4 when VRAM is insufficient or no CUDA device is present.
+  Psi4 when VRAM is insufficient or no CUDA device is present. See **CPU-fallback contract**.
 - **4 GB VRAM ceiling.** Fine at def2-SVP for ≤~20-atom complexes; def2-TZVP / larger →
   Psi4/CPU. Make the fallback automatic and logged, not a hard crash.
 - **PCM→SMD is a method change, not a free swap.** gpu4pyscf gains SMD (which Psi4 1.10.2
@@ -53,6 +53,29 @@ by config/env (`SNAR_QC_BACKEND=psi4|gpu4pyscf`); **Psi4 stays the default and f
 - **Thermochemistry convention.** Psi4 FD frequencies vs pyscf *analytic* frequencies differ
   by a few cm⁻¹; `snar_qc.qc.thermo` (Grimme qRRHO) consumes them. Re-confirm the single
   imaginary mode and the ΔG‡ offset — do not assume identical thermochem.
+
+## CPU-fallback contract (non-GPU hosts)
+
+snar-qc runs across hosts with **no NVIDIA GPU / CUDA** (the Windows workstation, CI, other
+dev machines). The backend must never break those — this is a hard, tested requirement, not a
+nice-to-have:
+
+1. **Default is Psi4/CPU.** GPU is opt-in via `SNAR_QC_BACKEND=gpu4pyscf` (or config). A fresh
+   checkout on any host behaves exactly as today; the GPU code path is not touched unless
+   explicitly selected.
+2. **gpu4pyscf / cupy are optional dependencies, never imported at package top level.** The GPU
+   calculator module is imported **lazily**, only when the GPU backend is selected. `import
+   snar_qc` and the entire Psi4 path must succeed with gpu4pyscf/cupy absent. Declare them as an
+   extra (`pip install snar-qc[gpu]`), not a core requirement.
+3. **Capability probe before use.** When GPU is selected, probe for a usable device (CUDA driver
+   present, `cupy.cuda.runtime.getDeviceCount() > 0`, enough free VRAM for the job) — wrapped so a
+   missing driver/library raises a typed, catchable error rather than a bare `ImportError`/segfault.
+4. **Fallback policy — silent default, loud override.** No GPU requested → run Psi4 silently (the
+   norm on CPU hosts, no noise). GPU requested but unavailable/insufficient → fall back to Psi4 and
+   **log a WARNING** (a job you expected on the GPU must not silently degrade unnoticed). Provide a
+   strict mode (e.g. a `require_gpu` flag) that errors instead of falling back, for benchmarking.
+5. **Single chokepoint.** The backend factory owns probe + lazy import + fallback decision;
+   calculators never import GPU libraries directly. One place to reason about, one place to test.
 
 ## Stages (each independently shippable; sub-session executes exactly one, leaves uncommitted)
 
@@ -74,6 +97,11 @@ by config/env (`SNAR_QC_BACKEND=psi4|gpu4pyscf`); **Psi4 stays the default and f
 - **The full test suite must be re-run after each stage and again after the complete backend
   is in place** — not only the new tests. A backend that passes its own stage tests can still
   regress the Psi4 path or the shared `barrier` / `thermo` drivers.
+- **CPU-fallback tests (CI-runnable, no GPU needed):** with gpu4pyscf absent (monkeypatched
+  `ImportError`) `import snar_qc` and the Psi4 path still work; a probe returning zero devices
+  falls back to Psi4 and logs a WARNING; the default (no backend selected) picks Psi4 and never
+  imports a GPU library; `require_gpu` raises instead of falling back. GPU-only tests carry a
+  skip marker when no CUDA device is present, so the suite stays green on CPU hosts and CI.
 
 ## Risks
 
