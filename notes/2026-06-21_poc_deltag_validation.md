@@ -173,3 +173,18 @@ N_WORKERS=4 THREADS=4 MEM_GB=5 bash scripts/run_poc_batch.sh \
 python scripts/validate_poc.py --slice data/external/lu74_poc_slice.csv \
     --run data/processed/poc_run --outdir notes/assets
 ```
+
+PowerShell (Windows workstation; the batch is a shell script, so invoke it through
+`bash` from Git Bash / WSL):
+
+```powershell
+# one substrate (smoke test)
+python scripts/run_poc.py --smiles "O=[N+]([O-])c1ccc(F)cc1" --leaving-group F `
+    --outdir data/processed/poc_smoke
+# the 10-substrate batch (parallel, resumable)
+$env:N_WORKERS = 4; $env:THREADS = 4; $env:MEM_GB = 5
+bash scripts/run_poc_batch.sh data/external/lu74_poc_slice.csv data/processed/poc_run
+# validation (correlation, magnitude, scatter)
+python scripts/validate_poc.py --slice data/external/lu74_poc_slice.csv `
+    --run data/processed/poc_run --outdir notes/assets
+```
