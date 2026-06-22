@@ -50,6 +50,16 @@ by config/env (`SNAR_QC_BACKEND=psi4|gpu4pyscf`); **Psi4 stays the default and f
 - **PCM→SMD is a method change, not a free swap.** gpu4pyscf gains SMD (which Psi4 1.10.2
   lacked), but switching the solvation model alters results — gate it behind the
   `2026-06-22_solvation_revalidation` plan's revalidation, *not* this backend swap.
+- **Verify the analytic *solvent* Hessian explicitly — it is the whole point in solution.**
+  The operation mapping lists `freq → mf.Hessian()` (gas) and `solvation → solvent.pcm` as
+  separate rows; no stage composes them. Psi4 1.10.2 has **no analytic PCM gradient/Hessian**,
+  so its solvent freq degrades to a *double* finite difference (a single 5-ring DMSO TS
+  needed **2353 PCM-SCF displacements**, ~24 GB RSS, aborted on 2026-06-22). The Psi4 path
+  therefore now does gas opt+freq + a PCM single-point correction (`barrier.py::_solvated_thermo`).
+  gpu4pyscf ships solvent gradient/Hessian code, so it *likely* offers an analytic solvated
+  Hessian — confirm this in **Stage C or E** on a PCM-wrapped `mf`. If it holds, the GPU
+  backend removes the workaround for solution-phase freq (a fresh argument for the backend);
+  if not, carry the gas-Hessian + PCM-SP protocol onto the GPU path too.
 - **Thermochemistry convention.** Psi4 FD frequencies vs pyscf *analytic* frequencies differ
   by a few cm⁻¹; `snar_qc.qc.thermo` (Grimme qRRHO) consumes them. Re-confirm the single
   imaginary mode and the ΔG‡ offset — do not assume identical thermochem.
@@ -76,6 +86,37 @@ nice-to-have:
    strict mode (e.g. a `require_gpu` flag) that errors instead of falling back, for benchmarking.
 5. **Single chokepoint.** The backend factory owns probe + lazy import + fallback decision;
    calculators never import GPU libraries directly. One place to reason about, one place to test.
+
+## Vendored-code boundary (predict_snar)
+
+The GPU backend must **not** touch the vendored third-party package `src/predict_snar/`
+(MIT, © Kjell Jorner; see `src/predict_snar/VENDORED.md`). The boundary that keeps this an
+additive change with **no** vendoring obligation:
+
+1. **Subclass, don't edit.** `GPU4PySCFCalculator` lives in `src/snar_qc/qc/` and subclasses
+   `predict_snar.calculators.Calculator`, using its public interface only — exactly as
+   `Psi4Calculator` does. No file under `src/predict_snar/` is modified.
+2. **Selection stays snar_qc-side.** The backend factory (CPU-fallback contract) chooses the
+   calculator. Do **not** add the GPU class to `predict_snar.jobs.py`'s by-name imports
+   (`G16Calculator, XTBCalculator, CRESTCalculator`) or its dispatch.
+3. **Orchestrate from snar_qc, not vendored `jobs.py`.** The vendored `Calculator` contract is
+   async (`single_point/opt/freq` return a process to `.wait()` on) and `jobs.py` drives it via
+   `.wait()` + `calculation_monitor()` + cclib file-parsing. The GPU/Psi4 calculators are
+   **synchronous** (return energy in Hartree). Drive them from the snar_qc orchestrators
+   (`snar_qc.poc.barrier`, `snar_qc.ts.psi4_tsscan`), which already accommodate the sync model.
+   The trap a TS-path stage (D) can fall into: patching vendored `jobs.py` to accept a sync
+   calculator. Don't — keep the GPU TS flow in snar_qc.
+4. **No coupling to vendored data.** The GPU path uses pyscf basis sets
+   (`gto.M(basis="def2-svp")`), not the vendored def2 pickles `predict_snar.data.get_basis` /
+   `get_ecp` resolve from `../data`. Keep it that way.
+
+**If a stage genuinely cannot avoid editing `predict_snar`**, it becomes a vendored
+modification and the three-step obligation applies (`CLAUDE.md`): (a) mark the site inline
+`# snar-qc: <reason>`, (b) add a *Local modifications* row to `VENDORED.md`, (c) correct the
+stale header claims — it currently asserts every module but the two Windows-patched files is
+"byte-for-byte upstream" and that "all snar-qc functionality lives in `snar_qc`", with `jobs`
+listed among the verbatim modules. Flag this to the master session before proceeding; prefer a
+snar_qc-side alternative.
 
 ## Stages (each independently shippable; sub-session executes exactly one, leaves uncommitted)
 
