@@ -1135,7 +1135,7 @@ class G16Calculator(Calculator):
 
         # Run the calculation.
         error_file = open(prefix + ".err", "w")
-        process = subprocess.Popen(submit_string.split(), stdout=error_file, stderr=subprocess.STDOUT, preexec_fn=os.setsid)
+        process = subprocess.Popen(submit_string.split(), stdout=error_file, stderr=subprocess.STDOUT, start_new_session=True)
         error_file.close()
         self.process = process
 
@@ -1412,7 +1412,7 @@ class XTBCalculator(Calculator):
         # Run calculation.
         out_file = open("xtb.out", "w")
         err_file = open("xtb.err", "w")
-        process = subprocess.Popen(submit_string.split(), stdout=out_file, stderr=err_file, preexec_fn=os.setsid)
+        process = subprocess.Popen(submit_string.split(), stdout=out_file, stderr=err_file, start_new_session=True)
         out_file.close()
         err_file.close()
 
@@ -1567,7 +1567,7 @@ class CRESTCalculator:
         err_file = open(self.submit_dir / "crest.err", "w")
         if self.scratch_dir:
             env["TMPDIR"] = self.scratch_dir.resolve().as_posix()
-        process = subprocess.Popen(submit_string.split(), stdout=out_file, stderr=err_file, preexec_fn=os.setsid, env=env)
+        process = subprocess.Popen(submit_string.split(), stdout=out_file, stderr=err_file, start_new_session=True, env=env)
         out_file.close()
         err_file.close()
 
