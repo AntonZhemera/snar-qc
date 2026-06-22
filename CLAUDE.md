@@ -91,6 +91,24 @@ Scopes: `qc`, `ts`, `template`, `descriptor`, `surrogate`, `model`, `data`, `psi
 
 Rules: imperative mood, lowercase, no trailing period, ≤ ~72 chars.
 
+## Vendored third-party code
+
+`src/predict_snar/` is a **vendored MIT package** (© 2020 Kjell Jorner, predict-SNAr) —
+upstream code, not ours. Default: **do not edit it**; build on top in `src/snar_qc/`.
+
+If you genuinely must touch it (e.g. a portability fix that can't live in `snar_qc`),
+treat all three of these as a single non-optional unit — never one without the others:
+
+1. **Mark the site inline** — add a `# snar-qc: <reason>` comment at each edited line, so
+   local patches stand out against upstream and a future re-vendor diff is obvious.
+2. **Record it** in [`src/predict_snar/VENDORED.md`](src/predict_snar/VENDORED.md) under
+   *Local modifications* (file, exact change, why, behaviour impact).
+3. **Never leave a false provenance claim standing** — any "unmodified / verbatim /
+   byte-for-byte" wording in `NOTICE` or `VENDORED.md` must be corrected in the same change.
+
+MIT permits the modification; the obligations are to preserve `src/predict_snar/LICENSE`
+and to not misrepresent what was changed. Precedent: `snar-qc` `ab17da7` + `1ee7349`.
+
 ## Plans / notes / docs
 
 - **Plans** (`plans/`): a single dated file `YYYY-MM-DD_Short_Description.md`, or a
