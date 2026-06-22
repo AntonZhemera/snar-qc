@@ -30,7 +30,8 @@ strategy, and the literature anchors.
 ```
 snar-qc/
 ├── src/
-│   └── snar_qc/            # core package (TS building, QC wrappers, ΔG‡, descriptors, surrogate)
+│   ├── snar_qc/            # core package (TS building, QC wrappers, ΔG‡, descriptors, surrogate)
+│   └── predict_snar/       # vendored MIT scaffolding (see src/predict_snar/VENDORED.md)
 ├── scripts/                # pipeline / batch scripts
 ├── tests/                  # pytest suite (TDD)
 ├── data/

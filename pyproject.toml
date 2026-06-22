@@ -37,7 +37,7 @@ Repository = "https://github.com/AntonZhemera/snar-qc.git"
 Issues = "https://github.com/AntonZhemera/snar-qc/issues"
 
 # src-layout: discover both the first-party package (snar_qc, incl. snar_qc.qc)
-# and the verbatim-vendored predict_snar package. The vendored package resolves
+# and the vendored predict_snar package. The vendored package resolves
 # its data dir via a relative ``../data`` path, so src/data/ is intentionally a
 # plain (non-package) data directory and is not listed here; it is picked up
 # from the source tree by the editable install.

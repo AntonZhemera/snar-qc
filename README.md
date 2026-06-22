@@ -49,7 +49,9 @@ ground-state descriptor tooling is consolidated here over time.
 
 ```
 snar-qc/
-├── src/snar_qc/     # core package
+├── src/
+│   ├── snar_qc/       # core package
+│   └── predict_snar/  # vendored MIT scaffolding (see src/predict_snar/VENDORED.md)
 ├── scripts/         # pipeline / batch scripts
 ├── tests/           # pytest suite
 ├── data/            # raw / processed / external (gitignored payloads)
