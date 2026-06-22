@@ -29,8 +29,10 @@ The Psi4 single points use the ``Psi4Calculator`` default level -- B3LYP-D3BJ/de
 the same level predict-snar uses for its DFT single points. The Gaussian-flavoured
 ``dft_options`` from the config (e.g. ``dispersion="gd3bj"``, a Gaussian solvent name,
 ``solvation_model`` for PCM) are **not** forwarded: their names do not map onto Psi4's
-method string and PCM solvation is out of Stage 2 scope. They are kept on
-:attr:`dft_options` for traceability; translating them (and wiring PCM) is deferred.
+method string. They are kept on :attr:`dft_options` for traceability. Implicit solvation
+is instead requested through the dedicated ``solvent`` constructor argument, which is
+passed to each per-point ``Psi4Calculator`` (PCMSolver / IEFPCM); with ``solvent=None``
+the single points are gas phase, as before.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import ase.io
 
@@ -63,12 +65,17 @@ class Psi4TSScan(TSScan):
             (see the module docstring).
         general_options: Carries ``central_atom`` / ``nu_atom`` / ``lg_atom`` (handled
             identically to the base class).
+        solvent: Optional PCMSolver solvent name (e.g. ``"DMSO"``). When set, every DFT
+            single point along the scan runs with the ``Psi4Calculator`` PCM path; left
+            ``None`` the scan single points are gas phase (the original behaviour). This
+            replaces the unforwarded Gaussian ``dft_options`` solvent for the Psi4 path.
 
     Attributes:
         dft: The Psi4 DFT calculator template (B3LYP-D3BJ/def2-SVP).
         dft_options: The raw Gaussian-flavoured DFT options (unused in Stage 2).
         dft_energies: DFT energies along the scan (kcal/mol, first point = 0.0).
         nbo_data: ``Psi4BondOrders`` per scan point (Mayer), in scan order.
+        solvent: The PCMSolver solvent name applied to the DFT single points, or ``None``.
     """
 
     def __init__(
@@ -77,6 +84,7 @@ class Psi4TSScan(TSScan):
         xtb_options: dict[str, Any],
         dft_options: dict[str, Any],
         general_options: dict[str, Any],
+        solvent: Optional[str] = None,
     ) -> None:
         # Reuse the base set-up verbatim: the xTB relaxed scan (constraints, force
         # constants, azide angle handling), the central/nu/lg atom indices and the
@@ -89,7 +97,9 @@ class Psi4TSScan(TSScan):
         # The G16-specific SP flags the base set (int_acc / scf_acc / nbo / chk) are
         # intentionally dropped -- Psi4 always returns the wavefunction and bond
         # orders come from oeprop, so there is no NBO/accuracy flag to honour.
-        self.dft = Psi4Calculator(atoms)
+        self.solvent = solvent
+        calc_options = {"solvent": solvent} if solvent else None
+        self.dft = Psi4Calculator(atoms, options=calc_options)
         self.g16 = self.dft
         self.dft_options = dft_options
 
@@ -185,10 +195,13 @@ class Psi4TSScan(TSScan):
         # files stay tidy; exist_ok keeps a re-run from blowing up on the dir.
         os.makedirs("sps", exist_ok=True)
 
+        calc_options = {"solvent": self.solvent} if self.solvent else None
         energies: list[float] = []
         wavefunctions: list[Any] = []
         for counter, geometry in enumerate(self.geometries, start=1):
-            calc = Psi4Calculator(atoms=geometry, file=f"sps/{counter}.in")
+            calc = Psi4Calculator(
+                atoms=geometry, file=f"sps/{counter}.in", options=calc_options
+            )
             energy = calc.single_point(n_procs=n_procs, mem=mem)
             energies.append(energy)
             wavefunctions.append(calc.wavefunction)

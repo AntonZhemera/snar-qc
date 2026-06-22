@@ -14,8 +14,16 @@ Geometry and charge are read from the ASE ``Atoms`` object (``atoms`` and
 electron-count parity, mirroring ``G16Calculator``'s rule.
 
 Scope (Stage 1): single-point energies are the must-have. ``opt`` and ``freq`` are
-thin wrappers over ``psi4.optimize`` / ``psi4.frequencies``. Solvation (PCM) and
-parser-compatible output files are intentionally **not** wired here.
+thin wrappers over ``psi4.optimize`` / ``psi4.frequencies``. Parser-compatible output
+files are intentionally **not** wired here.
+
+Scope (solvation stage): an optional **implicit-solvation** (PCM) path. When the
+``solvent`` option is set (e.g. ``"DMSO"``), :meth:`run_calc` configures Psi4's
+PCMSolver — IEFPCM with Bondi radii by default — so the SCF, and therefore *every*
+calculation type that routes through ``run_calc`` (single point / opt / freq / opt_freq
+/ ts / ts_freq), runs in the continuum solvent. With ``solvent`` left ``None`` the
+engine is gas phase, exactly as before. Note Psi4 1.10.2 has **no native SMD** (the
+predict-snar/Gaussian default); IEFPCM is the available continuum model here.
 
 Scope (Stage 3): a frequency run (``freq`` / ``opt_freq``) now captures harmonic
 thermochemistry off the Psi4 globals -- Gibbs free energy, enthalpy, ZPVE -- plus the
@@ -63,6 +71,11 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
     "e_convergence": 1e-8,
     "d_convergence": 1e-8,
     "geom_maxiter": 150,  # optking iteration cap (raised from Psi4's default 50)
+    # Implicit solvation (PCMSolver). ``solvent`` None -> gas phase (default); a
+    # PCMSolver solvent name (e.g. "DMSO") -> IEFPCM/Bondi continuum on the SCF.
+    "solvent": None,
+    "pcm_solver": "IEFPCM",
+    "pcm_radii": "Bondi",
 }
 
 
@@ -75,7 +88,8 @@ class Psi4Calculator(Calculator):
         file: Optional base name; used to name the Psi4 output file
             (``<prefix>.out``). Defaults to ``psi4.out``.
         options: Optional overrides merged onto the default options (e.g. a
-            different ``functional`` / ``basis_set`` / ``dispersion``).
+            different ``functional`` / ``basis_set`` / ``dispersion``, or ``solvent``
+            to switch on the PCM implicit-solvation path).
 
     Attributes:
         options: Calculation options (see ``_DEFAULT_OPTIONS``).
@@ -167,6 +181,36 @@ class Psi4Calculator(Calculator):
         method = f"{functional}-{dispersion}" if dispersion else functional
         return f"{method}/{self.options['basis_set']}"
 
+    # -- implicit solvation -----------------------------------------------------
+
+    def _pcm_input(self) -> str:
+        """Build the PCMSolver input block for the configured solvent.
+
+        Returns the multi-line PCMSolver ``Medium`` / ``Cavity`` specification that
+        ``psi4.pcm_helper`` parses. The solver type (``pcm_solver``, default IEFPCM),
+        the cavity radii set (``pcm_radii``, default Bondi), and the solvent name
+        (``solvent``, a PCMSolver-recognised name such as ``"DMSO"`` or ``"Water"``)
+        come from the options. PCMSolver's parser is line-oriented, so each keyword sits
+        on its own line (semicolon-joined keys are a parse error).
+        """
+        solvent = self.options["solvent"]
+        solver = self.options.get("pcm_solver") or "IEFPCM"
+        radii = self.options.get("pcm_radii") or "Bondi"
+        return (
+            "Units = Angstrom\n"
+            "Medium {\n"
+            f"   SolverType = {solver}\n"
+            f"   Solvent = {solvent}\n"
+            "}\n"
+            "Cavity {\n"
+            f"   RadiiSet = {radii}\n"
+            "   Type = GePol\n"
+            "   Scaling = True\n"
+            "   Area = 0.3\n"
+            "   Mode = Implicit\n"
+            "}\n"
+        )
+
     # -- transition-state requests ----------------------------------------------
 
     def ts(self, *args: Any, **kwargs: Any) -> float:
@@ -233,6 +277,14 @@ class Psi4Calculator(Calculator):
                 "d_convergence": self.options["d_convergence"],
             }
         )
+
+        # Implicit solvation: when a solvent is configured, load the PCMSolver block and
+        # switch the SCF to the PCM-coupled path. This propagates to every calculation
+        # type, since opt / freq / ts all route through this method. ``pcm_helper`` is
+        # re-issued each run because the per-run ``clean_options`` above resets it.
+        if self.options.get("solvent"):
+            psi4.pcm_helper(self._pcm_input())
+            psi4.set_options({"pcm": True, "pcm_scf_type": "total"})
 
         # Raise optking's iteration cap on any optimisation (Psi4 defaults to 50,
         # which is short for floppy or strained geometries).

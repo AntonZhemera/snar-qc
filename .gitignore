@@ -58,3 +58,7 @@ xtbopt.*
 xtbrestart.*
 autode_calculations/
 *_autode/
+# PCMSolver scratch (written to CWD by the PCM single point)
+PEDRA.OUT*
+cavity.off*
+cavity.npz
