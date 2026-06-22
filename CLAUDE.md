@@ -74,6 +74,25 @@ snar-qc/
 - Type hints on public APIs.
 - RDKit `Mol` objects can be `None` — always guard.
 
+### Cross-platform portability
+
+Development is dual-host: the primary workstation is **Windows 11**, the author also works
+from **Linux**, and a repo is routinely built on one and run on the other. So snar-qc code
+(scripts, package modules, launchers) is **multiplatform by default** — it must run on both
+Windows and Linux unless a step is explicitly documented as OS-specific.
+
+- Prefer portable constructs: `pathlib` / `os.path` over hard-coded separators; subprocess
+  flags that exist on both OSes (`subprocess.Popen(..., start_new_session=True)`, **not**
+  POSIX-only `preexec_fn=os.setsid`); UTF-8-safe I/O (set `PYTHONUTF8=1` where the console
+  encoding bites, e.g. the `Δ` in "ΔG‡" under Windows cp1252).
+- Shell scripts get **LF** line endings via `.gitattributes` (`*.sh text eol=lf`), so
+  `core.autocrlf` can't inject `\r`. Resolve interpreters explicitly when the name is
+  ambiguous (a bare `bash` on Windows may resolve to WSL's `System32\bash.exe`).
+- A Linux-only dev phase does **not** prove portability — Windows-only failures surface
+  only on the Windows host. Precedent (2026-06-22, solvated ΔG‡ campaign): `807f2e8`
+  (`.gitattributes` LF for `*.sh`), `ac43a37` (resolve Git Bash explicitly), `05285b9`
+  (`PYTHONUTF8=1`), `ab17da7` (`start_new_session=True` + `process.terminate()` fallback).
+
 ### Commit conventions
 
 Strict [Conventional Commits](https://www.conventionalcommits.org/):
