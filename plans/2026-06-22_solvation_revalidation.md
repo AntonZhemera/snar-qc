@@ -49,6 +49,30 @@ fix. See `notes/2026-06-21_poc_deltag_validation.md`.
 ### Step 4 — anionic nucleophile (stretch, deferred)
 - Optionally test methoxide vs the neutral amine once the solvated runs are in.
 
+## Run-time watch-list + refinements (added 2026-06-23, post method-fix)
+
+The campaign now runs the **gas-Hessian + PCM single-point** method (gas opt+freq; solvent
+applied as one PCM single point per gas geometry) with the soft-mode-tolerant TS gate — see
+`notes/2026-06-23_solvent_freq_pcm_singlepoint.md`. Two items to carry through the run:
+
+- **Triage fast `stage=scan` failures as their own class.** Substrate `lu_67`
+  (`Fc1cccc(Cl)n1`, F leaving) failed in ~10 s at the `scan` stage with
+  `FileNotFoundError: scan.xyz` — the xTB relaxed scan emitted no `scan.xyz`. That is a
+  scan/geometry-setup failure, **not** a ΔG‡ miss and not the TS-step cost issue; expect it
+  on some ortho-substituted pyridines. Record such cases as scan-stage failures in the
+  findings note and triage the xTB scan setup for them separately, rather than counting them
+  as solvation misses.
+
+- **Refinement — fix the geometry for a pure single-point solvent correction.** The
+  relaxed-scan DFT single points use PCM, so the located scan peak shifts between phases
+  (5-ring: node 8 → 7) and the gas vs DMSO TS optimisations seed from different guesses,
+  converging to different saddles (reaction modes −147 vs −264 cm⁻¹). The end-to-end
+  gas-vs-DMSO comparison stays internally consistent, but the reported solvent effect then
+  mixes the PCM electrostatic stabilisation with a geometry/guess difference. For a clean
+  single-point correction, seed the TS from the **gas** scan peak in both phases (or optimise
+  one gas TS and apply both the gas and PCM single points to it), so ΔΔG‡(solv) reflects only
+  `E(PCM) − E(gas)` at a fixed structure. Apply on the next re-validation pass.
+
 ## Out of scope this session
 - Running the multi-hour solvated QC campaign (happens on Windows).
 - Auto coordinate-selection / running both coordinates per substrate.
