@@ -71,6 +71,15 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
     "e_convergence": 1e-8,
     "d_convergence": 1e-8,
     "geom_maxiter": 150,  # optking iteration cap (raised from Psi4's default 50)
+    # Coordinate system for a *minimisation* (the opt / opt_freq path, ts off).
+    # Cartesian rather than optking's redundant internals: rigid planar aromatics
+    # carrying a near-linear group (e.g. an aryl nitrile, C#N ~180 deg) drive the
+    # internal-coordinate B-matrix to degeneracy, so the projected force never meets
+    # the gradient criterion and the BFGS update breaks down ("Denominators ...
+    # very small" / "Skipping Hessian update"), even from a near-minimum start.
+    # Cartesians are immune to that ill-conditioning. The TS path keeps optking's
+    # internals (it builds a Hessian and converges fine), so this is min-only.
+    "min_opt_coordinates": "cartesian",
     # Implicit solvation (PCMSolver). ``solvent`` None -> gas phase (default); a
     # PCMSolver solvent name (e.g. "DMSO") -> IEFPCM/Bondi continuum on the SCF.
     "solvent": None,
@@ -295,6 +304,12 @@ class Psi4Calculator(Calculator):
         # Only on the opt path; the normal MIN opt is left untouched.
         if do_opt and self.options.get("ts"):
             psi4.set_options({"opt_type": "TS", "full_hess_every": 0})
+        # Minimisation: run in Cartesian coordinates (see ``min_opt_coordinates`` in
+        # the defaults). Optking's redundant internals go degenerate on rigid planar
+        # aromatics with a near-linear substituent (aryl nitriles), so the force
+        # criterion is never met; Cartesians converge such species reliably.
+        elif do_opt and self.options.get("min_opt_coordinates"):
+            psi4.set_options({"opt_coordinates": self.options["min_opt_coordinates"]})
 
         method = self._method_string()
         if do_opt and do_freq:
