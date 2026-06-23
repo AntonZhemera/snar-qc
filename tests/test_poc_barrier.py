@@ -85,6 +85,26 @@ def test_count_imaginary_handles_none_and_signs():
     assert count_imaginary([-450.0, -30.0, 900.0]) == 2
 
 
+def test_count_significant_imaginary_ignores_soft_modes():
+    """Only imaginary modes at/above the cutoff count; soft sub-cutoff ones don't."""
+    from snar_qc.poc.barrier import (
+        TS_SOFT_IMAG_CUTOFF_CM,
+        count_significant_imaginary,
+    )
+
+    assert TS_SOFT_IMAG_CUTOFF_CM == 100.0
+    assert count_significant_imaginary(None) == 0
+    # A clean minimum / clean saddle.
+    assert count_significant_imaginary([12.0, 340.0, 1500.0]) == 0
+    assert count_significant_imaginary([-450.0, 200.0, 900.0]) == 1
+    # The real 5-ring case: one reaction mode (-143) + one soft rotor (-70) -> 1.
+    assert count_significant_imaginary([-143.3, -70.1, 86.9, 200.0]) == 1
+    # Two genuine imaginaries -> a real higher-order saddle.
+    assert count_significant_imaginary([-450.0, -260.0, 900.0]) == 2
+    # Cutoff is tunable.
+    assert count_significant_imaginary([-70.1, 200.0], cutoff=50.0) == 1
+
+
 def test_select_peak_index_picks_highest_energy_peak():
     """The rate-determining peak is the highest-energy surviving maximum."""
     scan = _FakeScan([_Peak(3, 5.0), _Peak(7, 12.0), _Peak(5, 9.0)])

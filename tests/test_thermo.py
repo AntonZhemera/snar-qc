@@ -100,6 +100,45 @@ def test_from_calculator_without_freq_run_raises():
         Psi4Thermo.from_calculator(calc)
 
 
+class _FakeFreqCalc:
+    """Minimal stand-in for a Psi4Calculator after a freq run (no SCF)."""
+
+    def __init__(self, frequencies):
+        self.frequencies = frequencies
+        self.energy = -100.0
+        self.free_energy = -99.0
+        self.enthalpy = -98.5
+        self.zpve = 0.05
+
+
+def test_soft_imaginary_mode_is_folded_into_thermo():
+    """A sub-cutoff imaginary (a soft rotor) is added back as a real low-frequency mode.
+
+    Folding lowers gibbs_qh (the rotor's qRRHO entropy stabilises G) and raises enthalpy
+    and zpve (ZPVE + thermal energy added), versus dropping it (soft_imag_cutoff=0).
+    """
+    calc = _FakeFreqCalc([-70.0, 50.0, 1800.0])
+    folded = Psi4Thermo.from_calculator(calc, soft_imag_cutoff=100.0)
+    dropped = Psi4Thermo.from_calculator(calc, soft_imag_cutoff=0.0)
+
+    assert folded.gibbs_qh < dropped.gibbs_qh  # TS stabilised
+    assert folded.enthalpy > dropped.enthalpy
+    assert folded.zpve > dropped.zpve
+    # Magnitude is sub-kcal for one ~70 cm^-1 mode.
+    assert 0.0 < (dropped.gibbs_qh - folded.gibbs_qh) * HARTREE_TO_KCAL < 1.0
+
+
+def test_genuine_reaction_mode_is_not_folded():
+    """An imaginary mode at/above the cutoff (a TS reaction mode) stays excluded."""
+    calc = _FakeFreqCalc([-1200.0, 1800.0])
+    folded = Psi4Thermo.from_calculator(calc, soft_imag_cutoff=100.0)
+    dropped = Psi4Thermo.from_calculator(calc, soft_imag_cutoff=0.0)
+
+    assert folded.gibbs_qh == dropped.gibbs_qh
+    assert folded.enthalpy == dropped.enthalpy
+    assert folded.zpve == dropped.zpve
+
+
 # -- activation_free_energy (pure) ---------------------------------------------
 
 

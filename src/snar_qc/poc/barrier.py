@@ -17,8 +17,15 @@ This is the Stage 4 glue that wires the Stage 1-3 pieces into one substrate run:
    quasi-harmonic Gibbs free energy.
 
 Solvation and coordinate (added for the cross-leaving-group re-validation). A ``solvent``
-argument switches the whole chain (scan DFT single points, TS opt+freq, both reference
-opt+freqs) onto the Psi4 PCM implicit-solvation path; ``None`` keeps it gas phase. A
+argument adds implicit solvation as a **PCM single-point correction on gas-phase
+geometries and Hessians**: every opt+freq (TS and both references) runs in gas phase,
+then a single PCM SCF at each gas geometry shifts the energetics by E(PCM) - E(gas)
+while keeping the gas thermal corrections. This is deliberate -- Psi4 has no analytic PCM
+gradients or Hessian, so a *solvent-phase* freq falls back to a double finite difference
+(thousands of PCM-SCF displacements: hours of wall time and tens of GB of RAM), whereas
+the SP correction captures the dominant electrostatic solvation at one SCF. The relaxed
+scan's DFT single points still use PCM directly (single points have no such cost).
+``None`` keeps the whole chain gas phase. A
 ``coordinate`` argument selects the relaxed-scan coordinate: ``"concerted"`` (the
 gas-phase-validated antisymmetric d(C-Nu) - d(C-LG) scan) or ``"addition"`` (scan only
 the forming C...Nu bond). The choice is recorded on the result and never auto-switched.
@@ -69,6 +76,14 @@ DEFAULT_SCAN_STOP = 1.45  # Angstrom, ~ a formed C-N single bond (forming bond e
 DEFAULT_SCAN_STOP_LG = 2.6  # Angstrom, ~ a near-broken C-LG bond (breaking bond end)
 DEFAULT_SCAN_STEPS = 14
 
+# Saddle-acceptance cutoff (cm^-1). A valid TS has exactly one imaginary mode with a
+# magnitude at/above this; smaller extra imaginaries are tolerated as soft modes (e.g. a
+# near-free methyl rotor the finite-difference Hessian rendered slightly imaginary) and
+# folded into the thermochemistry as real modes (see Psi4Thermo.from_calculator's
+# ``soft_imag_cutoff``, which this matches). Keeps a clean saddle bar one soft rotor from
+# being failed as ``ts_not_saddle``.
+TS_SOFT_IMAG_CUTOFF_CM = 100.0
+
 
 def count_imaginary(frequencies: Optional[list[float]]) -> int:
     """Number of imaginary (negative) vibrational modes.
@@ -85,6 +100,30 @@ def count_imaginary(frequencies: Optional[list[float]]) -> int:
     if not frequencies:
         return 0
     return sum(1 for nu in frequencies if nu < 0.0)
+
+
+def count_significant_imaginary(
+    frequencies: Optional[list[float]], cutoff: float = TS_SOFT_IMAG_CUTOFF_CM
+) -> int:
+    """Number of imaginary modes large enough to be a real saddle direction.
+
+    Counts imaginary (negative) modes whose magnitude is at/above ``cutoff`` (cm^-1). A
+    valid transition state has exactly one. Smaller imaginaries are soft modes (e.g. a
+    near-free rotor rendered slightly imaginary by the finite-difference Hessian); they
+    are tolerated by the saddle gate and folded into the thermochemistry as real modes
+    (see :data:`TS_SOFT_IMAG_CUTOFF_CM` and ``Psi4Thermo.from_calculator``'s
+    ``soft_imag_cutoff``).
+
+    Args:
+        frequencies: Signed vibrational frequencies (cm^-1), or ``None``.
+        cutoff: Magnitude threshold in cm^-1 (default :data:`TS_SOFT_IMAG_CUTOFF_CM`).
+
+    Returns:
+        The count of imaginary modes with ``abs(nu) >= cutoff`` (0 if ``None``).
+    """
+    if not frequencies:
+        return 0
+    return sum(1 for nu in frequencies if nu < 0.0 and abs(nu) >= cutoff)
 
 
 def select_peak_index(scan: Any) -> Optional[int]:
@@ -114,8 +153,11 @@ class BarrierResult:
     ``status`` is the single source of truth for whether the run reached a confirmed
     saddle point:
 
-    - ``completed`` -- TS located with exactly one imaginary frequency; ΔG‡ available.
-    - ``ts_not_saddle`` -- TS opt+freq finished but the imaginary-mode count != 1.
+    - ``completed`` -- TS located with exactly one imaginary mode at/above
+      ``TS_SOFT_IMAG_CUTOFF_CM`` (soft sub-cutoff extras tolerated; ``n_imag_ts_soft``
+      records how many); ΔG‡ available.
+    - ``ts_not_saddle`` -- TS opt+freq finished but the count of *significant* imaginary
+      modes (magnitude >= cutoff) is not 1.
     - ``no_peak`` -- the relaxed scan produced no validated maximum (no TS guess).
     - ``error`` -- an engine call raised; see ``error``.
 
@@ -136,6 +178,7 @@ class BarrierResult:
     delta_h_kcal: Optional[float] = None
     delta_e_kcal: Optional[float] = None
     n_imag_ts: Optional[int] = None
+    n_imag_ts_soft: Optional[int] = None
     n_imag_arx: Optional[int] = None
     n_imag_amine: Optional[int] = None
     ts_imag_freq_cm: Optional[float] = None
@@ -181,10 +224,77 @@ def _configure_engine() -> None:
         predict_snar_config.xtb = shutil.which("xtb") or "xtb"
 
 
+_BOHR_TO_ANGSTROM = 0.52917721067
+
+
+def _optimised_atoms(calc: Psi4Calculator) -> Any:
+    """ASE ``Atoms`` for the optimised geometry on a calculator's captured wavefunction.
+
+    Psi4 optimises its own internal molecule, leaving the input ``Atoms`` untouched, so
+    the relaxed geometry is read back off ``calc.wavefunction.molecule()`` (Bohr ->
+    Angstrom) to seed a follow-up single point.
+    """
+    from ase import Atoms
+
+    mol = calc.wavefunction.molecule()
+    symbols = [mol.symbol(i).capitalize() for i in range(mol.natom())]
+    positions = [
+        [
+            mol.x(i) * _BOHR_TO_ANGSTROM,
+            mol.y(i) * _BOHR_TO_ANGSTROM,
+            mol.z(i) * _BOHR_TO_ANGSTROM,
+        ]
+        for i in range(mol.natom())
+    ]
+    opt = Atoms(symbols=symbols, positions=positions)
+    opt.info["charge"] = int(round(mol.molecular_charge()))
+    return opt
+
+
+def _solvated_thermo(
+    gas_thermo: Psi4Thermo,
+    calc: Psi4Calculator,
+    file: str,
+    n_procs: int,
+    mem: float,
+    solvent: Optional[str],
+) -> Psi4Thermo:
+    """Apply an implicit solvent as a single-point correction on gas-phase thermochem.
+
+    Gas phase (``solvent`` None): returns ``gas_thermo`` unchanged. With a ``solvent``:
+    runs one PCM single point at the gas-optimised geometry and shifts every energy term
+    by ``E(PCM) - E(gas)``, keeping the gas-phase Hessian's thermal corrections, ZPVE
+    and frequencies. This is the standard gas-geometry + implicit-solvent single-point
+    protocol. It deliberately sidesteps a *solvent* opt+freq: Psi4 has no analytic PCM
+    gradients or Hessian, so a PCM frequency falls back to a double finite difference
+    (thousands of PCM-SCF displacements -- hours of compute and tens of GB of memory),
+    whereas the SP correction captures the dominant electrostatic solvation at one SCF.
+    """
+    if not solvent:
+        return gas_thermo
+    prefix = file.rsplit(".", 1)[0]
+    sp = Psi4Calculator(
+        _optimised_atoms(calc), file=f"{prefix}_pcm.in", options={"solvent": solvent}
+    )
+    e_pcm = sp.single_point(n_procs=n_procs, mem=mem)
+    shift = e_pcm - gas_thermo.electronic_energy
+    return Psi4Thermo(
+        electronic_energy=e_pcm,
+        gibbs=gas_thermo.gibbs + shift,
+        gibbs_qh=gas_thermo.gibbs_qh + shift,
+        enthalpy=gas_thermo.enthalpy + shift,
+        zpve=gas_thermo.zpve,
+        frequencies=gas_thermo.frequencies,
+    )
+
+
 def _species_thermo(
     atoms: Any, file: str, n_procs: int, mem: float, solvent: Optional[str] = None
 ) -> tuple[Psi4Thermo, int, float, float]:
     """Optimise + frequency-analyse a reference species and bundle its thermochemistry.
+
+    Geometry and Hessian are always gas phase; an implicit ``solvent`` is applied as a
+    PCM single-point correction at the gas geometry (see :func:`_solvated_thermo`).
 
     Args:
         atoms: ASE ``Atoms`` for the species (carries ``info["charge"]``).
@@ -196,11 +306,13 @@ def _species_thermo(
     Returns:
         ``(thermo, n_imaginary, electronic_energy_hartree, gibbs_qh_hartree)``.
     """
-    options = {"solvent": solvent} if solvent else None
-    calc = Psi4Calculator(atoms, file=file, options=options)
+    calc = Psi4Calculator(atoms, file=file, options=None)
     calc.opt_freq(n_procs=n_procs, mem=mem)
-    thermo = Psi4Thermo.from_calculator(calc)
-    return thermo, count_imaginary(calc.frequencies), calc.energy, thermo.gibbs_qh
+    n_imag = count_imaginary(calc.frequencies)
+    thermo = _solvated_thermo(
+        Psi4Thermo.from_calculator(calc), calc, file, n_procs, mem, solvent
+    )
+    return thermo, n_imag, thermo.electronic_energy, thermo.gibbs_qh
 
 
 def compute_barrier(
@@ -325,17 +437,25 @@ def compute_barrier(
         t0 = time.time()
         ts_guess = scan.geometries[peak_index].copy()
         ts_guess.info["charge"] = rc.atoms.info["charge"]
-        ts_options = {"solvent": solvent} if solvent else None
-        ts_calc = Psi4Calculator(ts_guess, file="ts.in", options=ts_options)
+        # TS opt+freq always in gas phase; the solvent is a PCM single-point correction
+        # at the gas saddle (Psi4 has no analytic PCM Hessian -- see _solvated_thermo).
+        ts_calc = Psi4Calculator(ts_guess, file="ts.in", options=None)
         ts_calc.ts_freq(n_procs=n_procs, mem=mem)
         result.timing_s["ts_opt_freq"] = time.time() - t0
 
+        # Saddle order and imaginary mode come from the gas-phase Hessian. Split the
+        # imaginary modes into *significant* (|nu| >= cutoff: a genuine reaction mode)
+        # and *soft* (below it: a near-free rotor tolerated and folded into the thermo).
         n_imag = count_imaginary(ts_calc.frequencies)
         result.n_imag_ts = n_imag
         imag = [nu for nu in (ts_calc.frequencies or []) if nu < 0.0]
         result.ts_imag_freq_cm = float(min(imag)) if imag else None
-        result.ts_energy_hartree = ts_calc.energy
-        ts_thermo = Psi4Thermo.from_calculator(ts_calc)
+        n_imag_significant = count_significant_imaginary(ts_calc.frequencies)
+        result.n_imag_ts_soft = n_imag - n_imag_significant
+        ts_thermo = _solvated_thermo(
+            Psi4Thermo.from_calculator(ts_calc), ts_calc, "ts.in", n_procs, mem, solvent
+        )
+        result.ts_energy_hartree = ts_thermo.electronic_energy
         result.ts_gibbs_qh_hartree = ts_thermo.gibbs_qh
 
         # --- 4. separated-reactants reference: bare ArX + bare amine -----------
@@ -378,7 +498,7 @@ def compute_barrier(
             ts_thermo, arx_thermo, amine_thermo, which="electronic_energy"
         )
 
-        result.status = "completed" if n_imag == 1 else "ts_not_saddle"
+        result.status = "completed" if n_imag_significant == 1 else "ts_not_saddle"
         return result
 
     except Exception as exc:  # noqa: BLE001 -- failure is recorded, not raised

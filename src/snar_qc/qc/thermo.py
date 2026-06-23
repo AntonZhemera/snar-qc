@@ -17,7 +17,14 @@ Following the predict-snar GoodVibes settings, the cutoff is **100 cm^-1**, the
 temperature **298.15 K**, and only the vibrational-entropy term is corrected -- the
 electronic energy, ZPVE, thermal enthalpy, and rotational/translational entropy are
 left at their harmonic values. Imaginary (negative), zero, and non-positive modes are
-dropped from the sum (Psi4's own thermo already excludes imaginary modes).
+dropped from the qRRHO sum (Psi4's own thermo already excludes imaginary modes).
+
+Soft imaginary modes. A near-free internal rotor can come out slightly imaginary from a
+finite-difference Hessian. :meth:`Psi4Thermo.from_calculator` folds such modes (magnitude
+below ``soft_imag_cutoff``) back in as real low-frequency modes -- adding their full
+harmonic + qRRHO contribution, since Psi4 dropped them -- while leaving a genuine TS
+reaction mode (magnitude at/above the cutoff) excluded. This keeps a TS that is a clean
+first-order saddle bar one soft rotor from being mis-scored or mis-classified.
 
 Units
 -----
@@ -48,6 +55,38 @@ _BAV = 1.0e-44
 
 # Hartree -> J/mol. HARTREE_TO_KCAL is Hartree -> kcal/mol; *4184 -> J/mol.
 _HARTREE_TO_J_PER_MOL = HARTREE_TO_KCAL * 4184.0
+
+
+def _mode_thermo_contributions(
+    nu: float, temperature: float, cutoff: float
+) -> tuple[float, float, float, float]:
+    """Per-mode thermochemical contributions of one *real positive* mode (cm^-1).
+
+    Returns ``(zpve, u_thermal, minus_T_s_ho, minus_T_s_qrrho)`` in **Hartree** — the
+    zero-point energy, the thermal vibrational internal energy above ZPVE, and the
+    harmonic-oscillator and Grimme-qRRHO entropy terms already multiplied by ``-T``.
+    Shared by :func:`grimme_qh_gibbs` (real modes) and the soft-imaginary folding in
+    :meth:`Psi4Thermo.from_calculator`.
+    """
+    omega = nu * _C_CM  # s^-1
+    x = _H * omega / (_KB * temperature)
+    zpve = 0.5 * _H * omega * _N_A  # J/mol
+    u_thermal = _R * temperature * x / (math.exp(x) - 1.0)  # J/mol
+    s_ho = _R * (x / (math.exp(x) - 1.0) - math.log(1.0 - math.exp(-x)))
+    mu = _H / (8.0 * math.pi**2 * omega)
+    mu_eff = mu * _BAV / (mu + _BAV)
+    s_fr = _R * (
+        0.5 + math.log((8.0 * math.pi**3 * mu_eff * _KB * temperature / _H**2) ** 0.5)
+    )
+    weight = 1.0 / (1.0 + (cutoff / nu) ** 4)
+    s_qrrho = weight * s_ho + (1.0 - weight) * s_fr
+    j = _HARTREE_TO_J_PER_MOL
+    return (
+        zpve / j,
+        u_thermal / j,
+        -temperature * s_ho / j,
+        -temperature * s_qrrho / j,
+    )
 
 
 def grimme_qh_gibbs(
@@ -82,33 +121,16 @@ def grimme_qh_gibbs(
     Returns:
         The quasi-harmonic Gibbs free energy in Hartree.
     """
-    delta_s = 0.0  # J mol^-1 K^-1, sum of (S_qRRHO - S_HO) over real positive modes
+    # Replace each real positive mode's harmonic entropy term -T*S_HO (already in
+    # harmonic_gibbs) with the qRRHO term -T*S_qRRHO. Imaginary/zero modes are dropped.
+    correction_hartree = 0.0
     for nu in frequencies:
         if nu <= 0.0:  # drop imaginary (negative), zero, non-positive modes
             continue
-
-        omega = nu * _C_CM  # vibrational frequency in s^-1
-        x = _H * omega / (_KB * temperature)
-
-        # Harmonic-oscillator vibrational entropy.
-        s_ho = _R * (x / (math.exp(x) - 1.0) - math.log(1.0 - math.exp(-x)))
-
-        # Free-rotor entropy from the moment of inertia, capped via Bav.
-        mu = _H / (8.0 * math.pi**2 * omega)
-        mu_eff = mu * _BAV / (mu + _BAV)
-        s_fr = _R * (
-            0.5
-            + math.log((8.0 * math.pi**3 * mu_eff * _KB * temperature / _H**2) ** 0.5)
+        _, _, minus_t_s_ho, minus_t_s_qrrho = _mode_thermo_contributions(
+            nu, temperature, cutoff
         )
-
-        # Grimme interpolation between harmonic and free-rotor entropy.
-        weight = 1.0 / (1.0 + (cutoff / nu) ** 4)
-        s_qrrho = weight * s_ho + (1.0 - weight) * s_fr
-
-        delta_s += s_qrrho - s_ho
-
-    # -T*delta_S in J/mol, converted to Hartree.
-    correction_hartree = -temperature * delta_s / _HARTREE_TO_J_PER_MOL
+        correction_hartree += minus_t_s_qrrho - minus_t_s_ho
     return harmonic_gibbs + correction_hartree
 
 
@@ -158,6 +180,7 @@ class Psi4Thermo:
         calc: "Psi4Calculator",
         temperature: float = 298.15,
         cutoff: float = 100.0,
+        soft_imag_cutoff: float = 100.0,
     ) -> "Psi4Thermo":
         """Build from a ``Psi4Calculator`` after a ``freq`` / ``opt_freq`` run.
 
@@ -169,6 +192,12 @@ class Psi4Thermo:
                 ``enthalpy`` / ``zpve`` were populated by a frequency run.
             temperature: Temperature in Kelvin for the quasi-harmonic correction.
             cutoff: Grimme frequency cutoff in cm^-1.
+            soft_imag_cutoff: Imaginary modes with magnitude **below** this cutoff
+                (cm^-1) are treated as real low-frequency modes and folded back into the
+                thermochemistry (a near-free rotor that the finite-difference Hessian
+                rendered slightly imaginary). Imaginary modes **at or above** it (a
+                genuine TS reaction mode) stay excluded. ``0.0`` disables folding (drop
+                all imaginary modes, as Psi4 does). Default 100 matches the Grimme cutoff.
 
         Returns:
             A populated :class:`Psi4Thermo`.
@@ -188,12 +217,33 @@ class Psi4Thermo:
             temperature=temperature,
             cutoff=cutoff,
         )
+        electronic_energy = calc.energy
+        gibbs = calc.free_energy
+        enthalpy = calc.enthalpy
+        zpve = calc.zpve
+
+        # Fold spurious soft imaginary modes back in as real low-frequency modes. Psi4
+        # drops every imaginary mode from its thermo, so a near-free rotor that came out
+        # slightly imaginary is missing entirely; add its full harmonic/qRRHO
+        # contribution to each quantity so they stay mutually consistent. The genuine
+        # reaction-mode imaginary (|nu| >= soft_imag_cutoff) is left out.
+        if soft_imag_cutoff > 0.0:
+            for nu in calc.frequencies:
+                if nu < 0.0 and abs(nu) < soft_imag_cutoff:
+                    z, u, mts_ho, mts_qrrho = _mode_thermo_contributions(
+                        abs(nu), temperature, cutoff
+                    )
+                    zpve += z
+                    enthalpy += z + u
+                    gibbs += z + u + mts_ho
+                    gibbs_qh += z + u + mts_qrrho
+
         return cls(
-            electronic_energy=calc.energy,
-            gibbs=calc.free_energy,
+            electronic_energy=electronic_energy,
+            gibbs=gibbs,
             gibbs_qh=gibbs_qh,
-            enthalpy=calc.enthalpy,
-            zpve=calc.zpve,
+            enthalpy=enthalpy,
+            zpve=zpve,
             frequencies=calc.frequencies,
         )
 
