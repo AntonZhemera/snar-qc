@@ -39,7 +39,7 @@ from typing import Optional
 
 import pandas as pd
 from rdkit import Chem, RDLogger
-from rdkit.Chem import rdMolDescriptors
+from rdkit.Chem import AllChem, rdMolDescriptors
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
 RDLogger.DisableLog("rdApp.*")  # quiet RDKit parse warnings; we guard None ourselves
@@ -116,6 +116,31 @@ def ring_class(mol: Chem.Mol) -> str:
             if len(arom_rings[i] & arom_rings[j]) >= 2:  # share a bond -> fused
                 return "fused"
     return "mono" if len(arom_rings) == 1 else "other"
+
+
+def buildable_lg_site(mol: Chem.Mol, element: str) -> bool:
+    """True iff a halogen of ``element`` sits on an aromatic carbon *as
+    ``build_reaction_complex`` will perceive it*.
+
+    The builder embeds + MMFF-optimises, and MMFF atom typing demotes 'fragile'
+    aromatic rings that RDKit's default model had aromatised (e.g. the coumarin
+    pyranone in ``O=c1cc(Cl)c2ccccc2o1`` or the azolo-fused C-Cl in
+    ``Clc1nccn2nnnc12``) -- so a naive default-RDKit check passes but the build
+    then raises "No leaving halide ... on an aromatic carbon". ``AddHs`` +
+    ``MMFFGetMoleculeProperties`` reproduces that exact demotion as an in-place
+    side effect, with no 3D embed, giving a fast and faithful buildability gate.
+    """
+    mol = Chem.AddHs(mol)
+    try:
+        AllChem.MMFFGetMoleculeProperties(mol)  # side effect: MMFF aromaticity perception
+    except Exception:  # noqa: BLE001 - unparametrised atom; fall through to the check
+        pass
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol() == element:
+            nbrs = atom.GetNeighbors()
+            if len(nbrs) == 1 and nbrs[0].GetSymbol() == "C" and nbrs[0].GetIsAromatic():
+                return True
+    return False
 
 
 def murcko(mol: Chem.Mol) -> str:
@@ -221,6 +246,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "arylator_id": rec.get("arylator_id", ""),
                 "smiles_canonical": rec["smiles_canonical"],
                 "leaving_group": lg,
+                "lg_buildable": buildable_lg_site(mol, lg),
                 "ring_class": ring_class(mol),
                 "heavy_atoms": mol.GetNumHeavyAtoms(),
                 "n_rotatable": rdMolDescriptors.CalcNumRotatableBonds(mol, strict=True),
@@ -246,6 +272,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             funnel["drop_flexible_chain"] += 1
         elif r["ring_class"] not in ("mono", "fused", "other"):
             funnel["drop_no_aromatic"] += 1
+        elif not r["lg_buildable"]:
+            funnel["drop_lg_unbuildable"] += 1
         else:
             clean.append(r)
     funnel["clean_pool"] = len(clean)
