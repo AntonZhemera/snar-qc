@@ -1,15 +1,15 @@
-"""Tests for snar_qc.qc.gpu4pyscf_calculator.GPU4PySCFCalculator (Stage A).
+"""Tests for snar_qc.qc.gpu4pyscf_calculator.GPU4PySCFCalculator (Stages A-B).
 
 The whole module is skipped where the optional ``[gpu]`` stack is absent (CI, the
 Windows workstation, CPU-only dev hosts) -- ``gpu4pyscf`` is imported at module scope by
 the calculator, so importing it here requires that stack. The CPU-fallback / factory
 behaviour is covered GPU-free in tests/test_backend.py.
 
-The slow energy test is a real gpu4pyscf B3LYP-D3BJ/def2-SVP single point on NH3, asserted
-for **parity** against the same pinned Psi4 reference the Psi4 calculator test uses
-(it additionally needs a usable CUDA device). The contract tests (multiplicity, option
-merge, the Stage-A NotImplementedError guards) need only the importable stack, not a
-device.
+The slow tests are real gpu4pyscf B3LYP-D3BJ/def2-SVP runs (and need a usable CUDA
+device): a single point on NH3 and a geometry minimisation of the rigid aryl-nitrile
+that broke optking, each asserted for **parity** against a pinned reference. The contract
+tests (multiplicity, option merge, coordinate selection, the NotImplementedError guards)
+need only the importable stack, not a device.
 """
 
 import math
@@ -28,6 +28,35 @@ from snar_qc.qc.gpu4pyscf_calculator import GPU4PySCFCalculator  # noqa: E402
 # so 1e-4 Ha here is a generous parity bound, not a loose one.
 NH3_REFERENCE_HARTREE = -56.51059216
 ENERGY_TOL_HARTREE = 1e-4
+
+# The 5-ring reference aryl halide N#Cc1ccc(F)s1 -- the rigid planar aryl nitrile whose
+# near-linear C#N drove optking's internals degenerate (forcing Cartesian min-opt on the
+# Psi4 path). geomeTRIC's TRIC relaxes it cleanly on GPU gradients; the minimum it reaches
+# is pinned here. Start geometry is an MMFF-relaxed embedding (deterministic, so the test
+# needs no RDKit); the B3LYP-D3BJ/def2-SVP minimum is basin-stable regardless of start.
+ARYL_HALIDE_MIN_HARTREE = -744.12555
+ARYL_HALIDE_START = [
+    ("N", (3.48380, -0.42810, -0.32213)),
+    ("C", (2.32788, -0.38165, -0.23039)),
+    ("C", (0.90669, -0.30208, -0.11405)),
+    ("C", (0.19164, 0.85764, 0.12191)),
+    ("C", (-1.21442, 0.61781, 0.18654)),
+    ("C", (-1.49965, -0.70930, -0.00293)),
+    ("F", (-2.75066, -1.19599, 0.01127)),
+    ("S", (-0.12471, -1.66346, -0.25448)),
+    ("H", (0.65045, 1.83302, 0.24298)),
+    ("H", (-1.97101, 1.37211, 0.36129)),
+]
+
+
+def _aryl_halide() -> Atoms:
+    """The 5-ring reference aryl halide (neutral, closed shell), MMFF start geometry."""
+    atoms = Atoms(
+        symbols=[s for s, _ in ARYL_HALIDE_START],
+        positions=[p for _, p in ARYL_HALIDE_START],
+    )
+    atoms.info["charge"] = 0
+    return atoms
 
 
 def _has_gpu_device() -> bool:
@@ -84,31 +113,44 @@ def test_charge_read_from_atoms():
     assert calc.options["charge"] == 0
 
 
-def test_solvent_not_supported_in_stage_a():
-    """Stage A is gas phase: a configured solvent raises, it does not run silently."""
+def test_solvent_not_supported_yet():
+    """A configured solvent raises (gas phase only); it does not run silently."""
     calc = GPU4PySCFCalculator(atoms=_nh3(), options={"solvent": "DMSO"})
     with pytest.raises(NotImplementedError, match="solvation"):
         calc.single_point()
 
 
-def test_opt_not_supported_in_stage_a():
+def test_freq_not_supported_yet():
     calc = GPU4PySCFCalculator(atoms=_nh3())
-    with pytest.raises(NotImplementedError, match="single_point only"):
-        calc.opt()
-
-
-def test_freq_not_supported_in_stage_a():
-    calc = GPU4PySCFCalculator(atoms=_nh3())
-    with pytest.raises(NotImplementedError, match="single_point only"):
+    with pytest.raises(NotImplementedError, match="not implemented yet"):
         calc.freq()
 
 
-def test_ts_flag_not_supported_in_stage_a():
-    """The ``ts`` guard fires even if the flag is set directly (no ts() in Stage A)."""
+def test_ts_flag_not_supported_yet():
+    """The ``ts`` guard fires even if the flag is set directly (no ts() until Stage D)."""
     calc = GPU4PySCFCalculator(atoms=_nh3())
     calc.options["ts"] = True
-    with pytest.raises(NotImplementedError, match="single_point only"):
+    with pytest.raises(NotImplementedError, match="not implemented yet"):
         calc.run_calc()
+
+
+def test_coordsys_default_is_tric():
+    """The min-opt default is geomeTRIC's TRIC (robust on the aryl-nitrile case)."""
+    assert GPU4PySCFCalculator(atoms=_nh3())._geometric_coordsys() == "tric"
+
+
+def test_coordsys_cartesian_alias():
+    """``"cartesian"`` (the Psi4 option value) maps to geomeTRIC's ``"cart"``."""
+    calc = GPU4PySCFCalculator(
+        atoms=_nh3(), options={"min_opt_coordinates": "Cartesian"}
+    )
+    assert calc._geometric_coordsys() == "cart"
+
+
+def test_coordsys_passthrough():
+    """A geomeTRIC coordsys name is passed through (lower-cased)."""
+    calc = GPU4PySCFCalculator(atoms=_nh3(), options={"min_opt_coordinates": "DLC"})
+    assert calc._geometric_coordsys() == "dlc"
 
 
 # -- energy parity (needs a real device) -----------------------------------------
@@ -129,3 +171,25 @@ def test_nh3_single_point_energy_parity():
     # A single point captures no thermochemistry.
     assert calc.free_energy is None
     assert calc.frequencies is None
+
+
+@pytest.mark.slow
+@requires_gpu_device
+def test_aryl_halide_min_opt_converges():
+    """geomeTRIC min-opt relaxes the hard aryl-nitrile to the pinned B3LYP minimum.
+
+    This is the Stage-B risk the masterplan flags: the rigid planar aryl nitrile that
+    broke optking's internals. geomeTRIC (GPU gradients, TRIC) must converge it.
+    """
+    atoms = _aryl_halide()
+    start = atoms.get_positions().copy()
+
+    calc = GPU4PySCFCalculator(atoms=atoms)
+    energy = calc.opt()
+
+    assert math.isfinite(energy)
+    assert calc.energy == energy
+    assert abs(energy - ARYL_HALIDE_MIN_HARTREE) < ENERGY_TOL_HARTREE
+    # The relaxed geometry is written back onto the Atoms (it moved off the MMFF start).
+    assert calc.atoms is atoms
+    assert not (atoms.get_positions() == start).all()

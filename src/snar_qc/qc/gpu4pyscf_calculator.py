@@ -8,10 +8,11 @@ runs the same method -- **B3LYP-D3BJ / def2-SVP** with density fitting -- return
 energy in Hartree. Energy parity with Psi4 at this level was shown to 3x10^-7 Ha on the
 5-ring reference complex (``notes/2026-06-23_gpu_hessian_benchmark.md``).
 
-**Stage A scope: gas-phase single points only.** ``opt`` / ``freq`` / ``ts`` and the PCM
-solvation path raise ``NotImplementedError`` here; they arrive in Stages B-E. The Psi4
-backend remains the default and the fallback for everything (CPU hosts, large
-substrates, anything exceeding the 4 GB VRAM ceiling).
+**Scope so far: gas-phase single points (Stage A) and minimisations (Stage B).**
+``single_point`` runs an SCF; ``opt`` minimises with geomeTRIC on GPU gradients.
+``freq`` / ``ts`` and the PCM solvation path still raise ``NotImplementedError`` (Stages
+C-E). The Psi4 backend remains the default and the fallback for everything (CPU hosts,
+large substrates, anything exceeding the 4 GB VRAM ceiling).
 
 **Import discipline (CPU-fallback contract).** This module imports ``pyscf`` /
 ``gpu4pyscf`` / ``cupy`` at *module* scope -- which is exactly why it must only ever be
@@ -53,11 +54,20 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
     "scf_type": "df",  # density fitting (parity with Psi4 scf_type="df")
     "reference": None,  # resolved per-calculation from multiplicity (rks / uks)
     "solvent": None,
+    # Coordinate system for a minimisation (the opt path). geomeTRIC's native TRIC,
+    # not the Psi4 path's "cartesian": optking's *redundant internals* went degenerate
+    # on rigid planar aryl nitriles (near-linear C#N), forcing Psi4 onto Cartesians,
+    # but geomeTRIC's translation-rotation internal coordinates converge that exact
+    # hard case cleanly and in fewer steps (verified on N#Cc1ccc(F)s1: TRIC 10 vs
+    # Cartesian 20, same minimum). Accepts geomeTRIC coordsys names; "cartesian" is
+    # aliased to "cart" for cross-backend option parity.
+    "min_opt_coordinates": "tric",
+    "geom_maxiter": 150,  # geomeTRIC step cap (mirrors the Psi4 optking cap)
 }
 
 
 class GPU4PySCFCalculator(Calculator):
-    """Run B3LYP-D3BJ/def2-SVP single points through gpu4pyscf.
+    """Run B3LYP-D3BJ/def2-SVP single points and minimisations through gpu4pyscf.
 
     Args:
         atoms: ASE ``Atoms`` carrying the geometry (Angstrom) and the total molecular
@@ -155,13 +165,44 @@ class GPU4PySCFCalculator(Calculator):
 
         return mf
 
+    # -- minimisation -----------------------------------------------------------
+
+    # Cross-backend aliases onto geomeTRIC coordinate-system names.
+    _COORDSYS_ALIASES = {"cartesian": "cart", "internal": "tric"}
+
+    def _geometric_coordsys(self) -> str:
+        """Resolve the configured ``min_opt_coordinates`` to a geomeTRIC coordsys name."""
+        raw = (self.options.get("min_opt_coordinates") or "tric").strip().lower()
+        return self._COORDSYS_ALIASES.get(raw, raw)
+
+    def _run_min_opt(self, mf: Any) -> "gto.Mole":
+        """Minimise the geometry with geomeTRIC on gpu4pyscf gradients.
+
+        gpu4pyscf has no ``geometric_solver``; pyscf's drives the optimisation and calls
+        the gpu4pyscf gradient (``mf.nuc_grad_method()`` -> a GPU ``Gradients``) each
+        step, so the gradient evaluations run on the GPU. Returns the optimised ``Mole``.
+        """
+        from pyscf.geomopt.geometric_solver import optimize  # noqa: PLC0415 -- lazy
+
+        maxsteps = int(self.options.get("geom_maxiter") or 150)
+        return optimize(mf, maxsteps=maxsteps, coordsys=self._geometric_coordsys())
+
+    def _write_optimised_geometry(self, mol: "gto.Mole") -> None:
+        """Write the optimised coordinates back onto ``self.atoms`` (Angstrom).
+
+        The GPU analogue of reading the relaxed geometry off a Psi4 wavefunction. pyscf
+        preserves atom order, so the row order matches ``self.atoms``.
+        """
+        if self.atoms is not None:
+            self.atoms.set_positions(mol.atom_coords(unit="Angstrom"))
+
     # -- driver -----------------------------------------------------------------
 
     def run_calc(self, n_procs: int = 1, mem: float = 2.0) -> float:
         """Run the gpu4pyscf calculation selected by the ``opt`` / ``freq`` flags.
 
-        The inherited ``single_point`` sets ``opt=freq=ts=False`` before calling this.
-        Stage A implements the single-point path only.
+        The inherited ``single_point`` / ``opt`` set those flags before calling this.
+        Implemented so far: ``single_point`` (Stage A) and ``opt`` minimisation (Stage B).
 
         Args:
             n_procs: Accepted for interface parity with ``Psi4Calculator``; gpu4pyscf
@@ -170,25 +211,34 @@ class GPU4PySCFCalculator(Calculator):
                 budget. (The factory's probe enforces the VRAM floor.)
 
         Returns:
-            The total energy in Hartree. Also stored on ``self.energy``; the mean-field
-            object is stored on ``self.mean_field``.
+            The total energy in Hartree. Also stored on ``self.energy``; the converged
+            mean-field object on ``self.mean_field``. For an ``opt`` the energy and
+            mean-field are those of the relaxed geometry, which is written back onto
+            ``self.atoms``.
         """
         if self.options.get("solvent"):
             raise NotImplementedError(
-                "GPU4PySCFCalculator solvation (PCM/SMD) is not in Stage A "
-                "(gas-phase single points only); it is gated through the solvation "
-                "revalidation plan. Use the Psi4 backend for solvent runs."
+                "GPU4PySCFCalculator solvation (PCM/SMD) is not implemented yet "
+                "(gas phase only); it is gated through the solvation revalidation plan. "
+                "Use the Psi4 backend for solvent runs."
             )
-        if any(self.options.get(flag) for flag in ("opt", "freq", "ts")):
+        if any(self.options.get(flag) for flag in ("freq", "ts")):
             raise NotImplementedError(
-                "GPU4PySCFCalculator supports single_point only in Stage A; "
-                "opt / freq / ts arrive in Stages B-D. Use the Psi4 backend meanwhile."
+                "GPU4PySCFCalculator freq / ts are not implemented yet (Stages C-D); "
+                "single_point and opt are available. Use the Psi4 backend meanwhile."
             )
 
         mol = self._build_mol()
         mf = self._build_mean_field(mol)
-        energy = float(mf.kernel())
 
+        if self.options.get("opt"):
+            # Relax the geometry, then re-build the mean-field on the optimised mol so
+            # self.energy / self.mean_field describe the converged minimum cleanly.
+            mol = self._run_min_opt(mf)
+            self._write_optimised_geometry(mol)
+            mf = self._build_mean_field(mol)
+
+        energy = float(mf.kernel())
         self.energy = energy
         self.mean_field = mf
         return self.energy
