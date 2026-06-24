@@ -35,6 +35,15 @@ ENERGY_TOL_HARTREE = 1e-4
 # is pinned here. Start geometry is an MMFF-relaxed embedding (deterministic, so the test
 # needs no RDKit); the B3LYP-D3BJ/def2-SVP minimum is basin-stable regardless of start.
 ARYL_HALIDE_MIN_HARTREE = -744.12555
+# Psi4 (B3LYP-D3BJ/def2-SVP) opt_freq reference on the same aryl halide, for the Stage C
+# analytic-Hessian thermochemistry parity. Cs/sigma=1, so no rotational-symmetry-number
+# ambiguity between the backends. Enthalpy/ZPVE match the GPU analytic Hessian to <3e-5 Ha;
+# Gibbs differs ~1.8e-4 Ha (0.11 kcal/mol) via the low-mode entropy -- the expected
+# few-cm^-1 analytic-vs-finite-difference frequency difference.
+PSI4_ARYL_GIBBS_HARTREE = -744.0993651
+PSI4_ARYL_ENTHALPY_HARTREE = -744.0601765
+PSI4_ARYL_ZPVE_HARTREE = 0.0578450
+GIBBS_TOL_HARTREE = 5e-4  # covers the analytic-vs-FD low-mode entropy difference
 ARYL_HALIDE_START = [
     ("N", (3.48380, -0.42810, -0.32213)),
     ("C", (2.32788, -0.38165, -0.23039)),
@@ -120,12 +129,6 @@ def test_solvent_not_supported_yet():
         calc.single_point()
 
 
-def test_freq_not_supported_yet():
-    calc = GPU4PySCFCalculator(atoms=_nh3())
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
-        calc.freq()
-
-
 def test_ts_flag_not_supported_yet():
     """The ``ts`` guard fires even if the flag is set directly (no ts() until Stage D)."""
     calc = GPU4PySCFCalculator(atoms=_nh3())
@@ -193,3 +196,33 @@ def test_aryl_halide_min_opt_converges():
     # The relaxed geometry is written back onto the Atoms (it moved off the MMFF start).
     assert calc.atoms is atoms
     assert not (atoms.get_positions() == start).all()
+
+
+@pytest.mark.slow
+@requires_gpu_device
+def test_aryl_halide_freq_thermo_parity():
+    """Analytic-Hessian frequencies + thermochemistry match the Psi4 FD-freq reference.
+
+    Stage C: opt_freq builds the analytic Hessian and harmonic thermochemistry. Enthalpy
+    and ZPVE track Psi4 to <1e-4 Ha; Gibbs to <5e-4 Ha (the low-mode entropy carries the
+    few-cm^-1 analytic-vs-FD difference). The frequency list is signed cm^-1 with this
+    minimum showing no imaginary mode, and feeds snar_qc.qc.thermo unchanged.
+    """
+    calc = GPU4PySCFCalculator(atoms=_aryl_halide())
+    calc.opt_freq()
+
+    # Frequency list: 3N-6 = 24 modes, all real (a minimum), signed-cm^-1 convention.
+    assert len(calc.frequencies) == 24
+    assert all(f > 0.0 for f in calc.frequencies)
+
+    # Harmonic thermochemistry parity vs Psi4.
+    assert abs(calc.zpve - PSI4_ARYL_ZPVE_HARTREE) < ENERGY_TOL_HARTREE
+    assert abs(calc.enthalpy - PSI4_ARYL_ENTHALPY_HARTREE) < ENERGY_TOL_HARTREE
+    assert abs(calc.free_energy - PSI4_ARYL_GIBBS_HARTREE) < GIBBS_TOL_HARTREE
+
+    # The GPU calculator duck-types into snar_qc.qc.thermo (the Psi4-named helper).
+    from snar_qc.qc.thermo import Psi4Thermo
+
+    thermo = Psi4Thermo.from_calculator(calc)
+    assert thermo.imaginary_frequencies == []
+    assert math.isfinite(thermo.gibbs_qh)

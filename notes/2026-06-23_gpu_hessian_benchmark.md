@@ -60,6 +60,28 @@ separate the two questions they answer: **per-job latency** (one GPU job vs one 
 job) versus **throughput** (production runs 4 CPU workers concurrently, whereas a single 4 GB
 GPU runs one job at a time — so the GPU's throughput edge is smaller than its latency edge).
 
+## Clean Hessian re-benchmark (2026-06-24, Stage C)
+
+Done on an **idle 16-core host**, Hessian step only, same B3LYP-D3BJ/def2-SVP level, on the
+**5-ring reference aryl halide `N#Cc1ccc(F)s1` (10 atoms)** at its optimised geometry —
+GPU analytic Hessian vs a **dedicated 16-thread** Psi4 FD Hessian:
+
+| Hessian | wall |
+|---|---|
+| GPU analytic (one shot, RTX 3050 Ti) | **20.8 s** |
+| Psi4 FD, 16 threads, idle host | **232.6 s** |
+
+**Clean per-job latency: ~11×** — the honest figure that replaces the contended-batch
+**~117× upper bound** above. The gap is real and structural (analytic vs FD) but an order of
+magnitude smaller than the inflated number, because the original CPU reference was a
+4-thread *contended* worker and on the larger 17-atom complex. Two notes: (i) the FD Hessian
+cost grows with `6N+1` displacements, so the **larger production complexes favour the GPU
+more** than this 10-atom case; (ii) this is **latency** (one job each) — the production
+throughput comparison (4 concurrent CPU workers vs one 4 GB GPU job) lands with Stage D. The
+analytic Hessian + qRRHO thermochemistry also reproduce the Psi4 FD result: enthalpy/ZPVE to
+<3e-5 Ha, Gibbs to 1.8e-4 Ha (≈0.11 kcal/mol, the low-mode entropy carrying the few-cm⁻¹
+analytic-vs-FD difference).
+
 ## Implication
 
 Worth wiring a gpu4pyscf backend into the engine — design in
