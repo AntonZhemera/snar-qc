@@ -1,0 +1,6 @@
+id,smiles_canonical,leaving_group,source_cohort,prior_failure_mode
+lu_27,N#Cc1ccnc(Cl)c1,Cl,lu74_solv_slice,ts_150iter_nonconvergence
+lu_65,COc1ccc(Cl)nc1,Cl,lu74_solv_slice,spurious_ts_nonreaction_saddle
+a2,O=[N+]([O-])c1ccc(Cl)s1,Cl,qc_test_5ring_arylators,pcm_cavity_not_positive_definite
+a4,N#Cc1ccc(F)s1,F,qc_test_5ring_arylators,ts_150iter_nonconvergence
+a5,N#Cc1nnc(Cl)s1,Cl,qc_test_5ring_arylators,ts_150iter_nonconvergence
