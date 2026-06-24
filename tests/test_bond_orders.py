@@ -1,10 +1,12 @@
-"""Tests for snar_qc.qc.bond_orders.Psi4BondOrders.
+"""Tests for snar_qc.qc.bond_orders (Psi4BondOrders + the backend factory).
 
 The bond-order values are validated against unambiguous references at the production
 DFT level (B3LYP-D3BJ/def2-SVP): H2O O-H is a single bond (Mayer ~ 1.0) and N2 is a
 triple bond (Mayer well above 2.5). Those need a real Psi4 SCF, so they are marked
-slow; the molecules are tiny (sub-second to ~2 s). A fast guard test (no SCF) covers
-the None-wavefunction error path.
+slow; the molecules are tiny (sub-second to ~2 s). Fast guard tests (no SCF) cover the
+None-handle error paths and the ``bond_orders_from_calculator`` backend dispatch. The
+GPU ``PyscfBondOrders`` Mayer values (needing a CUDA device + the [gpu] stack) are
+exercised against these same references in tests/test_gpu4pyscf_calculator.py.
 """
 
 import math
@@ -12,7 +14,12 @@ import math
 import pytest
 from ase import Atoms
 
-from snar_qc.qc.bond_orders import Psi4BondOrders
+import snar_qc.qc.bond_orders as bond_orders_module
+from snar_qc.qc.bond_orders import (
+    Psi4BondOrders,
+    PyscfBondOrders,
+    bond_orders_from_calculator,
+)
 from snar_qc.qc.psi4_calculator import Psi4Calculator
 
 
@@ -41,6 +48,51 @@ def test_rejects_none_wavefunction():
     """Building from a missing wavefunction is a clear ValueError (no SCF needed)."""
     with pytest.raises(ValueError):
         Psi4BondOrders(None)
+
+
+def test_pyscf_bond_orders_rejects_none():
+    """PyscfBondOrders also guards a missing mean-field (no device/SCF needed)."""
+    with pytest.raises(ValueError):
+        PyscfBondOrders(None)
+
+
+def test_pyscf_bond_orders_rejects_unsupported_kind():
+    """Only 'mayer' is implemented on the GPU adapter; other kinds raise clearly."""
+    # A non-None dummy reaches the kind check before any matrix is built, so this
+    # needs neither a real mean-field nor a device.
+    with pytest.raises(ValueError, match="mayer"):
+        PyscfBondOrders(object(), kind="wiberg")
+
+
+def test_factory_dispatches_on_backend_handle(monkeypatch):
+    """bond_orders_from_calculator selects the adapter by the calculator's QC handle.
+
+    A Psi4 calculator carries a populated ``wavefunction`` -> Psi4BondOrders; a GPU
+    calculator carries a ``mean_field`` -> PyscfBondOrders; a calculator that has not run
+    a single point (neither populated) is a TypeError. The two adapters are monkeypatched
+    to sentinels so the dispatch is checked without any real SCF (runs with no device).
+    """
+    monkeypatch.setattr(
+        bond_orders_module, "Psi4BondOrders", lambda wfn, kind="mayer": ("psi4", wfn, kind)
+    )
+    monkeypatch.setattr(
+        bond_orders_module, "PyscfBondOrders", lambda mf, kind="mayer": ("pyscf", mf, kind)
+    )
+
+    class _Psi4Like:  # populated Psi4 wavefunction, no mean_field
+        wavefunction = "wfn"
+
+    class _GpuLike:  # populated GPU mean-field, no wavefunction
+        mean_field = "mf"
+
+    class _Unrun:  # neither handle populated (no single point yet)
+        wavefunction = None
+        mean_field = None
+
+    assert bond_orders_from_calculator(_Psi4Like()) == ("psi4", "wfn", "mayer")
+    assert bond_orders_from_calculator(_GpuLike()) == ("pyscf", "mf", "mayer")
+    with pytest.raises(TypeError):
+        bond_orders_from_calculator(_Unrun())
 
 
 @pytest.mark.slow

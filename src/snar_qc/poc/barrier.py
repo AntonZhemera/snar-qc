@@ -60,12 +60,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import predict_snar.config as predict_snar_config
 
 from snar_qc.qc.backend import make_calculator
-from snar_qc.qc.psi4_calculator import Psi4Calculator
 from snar_qc.qc.thermo import Psi4Thermo, activation_free_energy
 from snar_qc.ts.psi4_tsscan import Psi4TSScan
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from snar_qc.poc.complex import ReactionComplex
+    from snar_qc.qc.psi4_calculator import Psi4Calculator
 
 # Scan defaults. The S~N~Ar reaction coordinate is the *antisymmetric* combination
 # d(C-Nu) - d(C-LG): a concerted relaxed scan that forms the C...Nu bond while breaking
@@ -228,7 +228,7 @@ def _configure_engine() -> None:
 _BOHR_TO_ANGSTROM = 0.52917721067
 
 
-def _optimised_atoms(calc: Psi4Calculator) -> Any:
+def _optimised_atoms(calc: "Psi4Calculator") -> Any:
     """ASE ``Atoms`` for the optimised geometry on a calculator's captured wavefunction.
 
     Psi4 optimises its own internal molecule, leaving the input ``Atoms`` untouched, so
@@ -254,7 +254,7 @@ def _optimised_atoms(calc: Psi4Calculator) -> Any:
 
 def _solvated_thermo(
     gas_thermo: Psi4Thermo,
-    calc: Psi4Calculator,
+    calc: "Psi4Calculator",
     file: str,
     n_procs: int,
     mem: float,
@@ -278,6 +278,10 @@ def _solvated_thermo(
     # correction at the gas geometry (it reads the Psi4 wavefunction via
     # ``_optimised_atoms``). GPU solvation is gated through the solvation-revalidation
     # plan, so the solvent path stays on Psi4 regardless of the selected backend.
+    # Lazy import keeps the gas-phase GPU chain (gpuqc env, no Psi4) importable: this
+    # branch is only reached when a solvent is requested, which the GPU path is not.
+    from snar_qc.qc.psi4_calculator import Psi4Calculator  # noqa: PLC0415
+
     sp = Psi4Calculator(
         _optimised_atoms(calc), file=f"{prefix}_pcm.in", options={"solvent": solvent}
     )

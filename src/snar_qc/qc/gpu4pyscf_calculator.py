@@ -353,3 +353,26 @@ class GPU4PySCFCalculator(Calculator):
         self.free_energy = float(th["G_tot"][0])
         self.enthalpy = float(th["H_tot"][0])
         self.zpve = float(th["ZPE"][0])
+
+    # -- device memory ----------------------------------------------------------
+
+    def free_device_memory(self) -> None:
+        """Release cached device memory so a long sequence of GPU jobs holds VRAM flat.
+
+        cupy / gpu4pyscf cache freed device blocks in a memory pool rather than returning
+        them to the driver, so the *driver-visible* free VRAM (what
+        :func:`snar_qc.qc.backend.probe_gpu` checks) drifts down across a run of single
+        points -- the relaxed-scan DFT points are ~14 in a row -- and eventually trips
+        ``GPUUnavailableError`` mid-scan on the 4 GB card. Dropping the retained
+        ``mean_field`` (its device arrays are otherwise "in use", so the pool keeps them)
+        and freeing the pools' unused blocks after a point is consumed keeps free VRAM
+        flat. ``free_all_blocks`` only releases blocks not currently in use, so a caller
+        that has already read what it needs off ``mean_field`` (energy, bond orders,
+        thermochemistry) loses nothing. A no-op-safe call: the orchestrators invoke it
+        duck-typed (``getattr``), so the Psi4 path -- which has no such method -- skips it.
+        """
+        self.mean_field = None
+        import cupy  # noqa: PLC0415 -- lazy: optional [gpu] dependency
+
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()

@@ -6,22 +6,25 @@ Psi4 contract forces. The xTB relaxed scan itself is reused verbatim (``run_scan
 ``read_scan_output`` are inherited), so are ``find_peaks`` / ``validate_peaks`` /
 ``make_plot`` and the constraint helpers. What changes:
 
-* the DFT single points along the scan run through :class:`snar_qc.qc.psi4_calculator.
-  Psi4Calculator` (B3LYP-D3BJ/def2-SVP) instead of Gaussian 16, and
-* the peak-validation bond orders come from :class:`snar_qc.qc.bond_orders.
-  Psi4BondOrders` (Mayer) instead of Gaussian NBO Wiberg indices.
+* the DFT single points along the scan run through the active snar_qc backend (via
+  :func:`snar_qc.qc.backend.make_calculator` -- Psi4 or gpu4pyscf, B3LYP-D3BJ/def2-SVP)
+  instead of Gaussian 16, and
+* the peak-validation bond orders come from the matching Mayer adapter
+  (:func:`snar_qc.qc.bond_orders.bond_orders_from_calculator` -> ``Psi4BondOrders`` /
+  ``PyscfBondOrders``) instead of Gaussian NBO Wiberg indices.
 
 Sync vs. async
 --------------
 ``G16Calculator.run_calc`` is *asynchronous*: ``TSScan.run_sps`` launches one Gaussian
 job per scan geometry via ``subprocess.Popen`` (joblib-parallel) and ``read_sp_output``
-later parses the ``sps/*.log`` files. ``Psi4Calculator.run_calc`` is *synchronous*: it
-returns the energy (Hartree) in-process and stores the wavefunction. So :meth:`run_sps`
-runs each single point in-process and **stashes** the energies and wavefunctions on the
-instance, and :meth:`read_sp_output` consumes those stashes (no log files, no wait-loop)
-to populate :attr:`dft_energies` (kcal/mol, referenced to the first scan point) and
-:attr:`nbo_data`. The scan-level handoff is unchanged: the caller still does
-``scan.run_scan(...).wait()`` (xTB Popen) then ``read_scan_output()`` before ``run_sps``.
+later parses the ``sps/*.log`` files. The snar_qc calculators' ``run_calc`` is
+*synchronous*: it returns the energy (Hartree) in-process and stores its backend handle
+(a Psi4 wavefunction or a GPU mean-field). So :meth:`run_sps` runs each single point
+in-process and **stashes** the energies and per-point Mayer bond orders on the instance,
+and :meth:`read_sp_output` consumes those stashes (no log files, no wait-loop) to populate
+:attr:`dft_energies` (kcal/mol, referenced to the first scan point) and :attr:`nbo_data`.
+The scan-level handoff is unchanged: the caller still does ``scan.run_scan(...).wait()``
+(xTB Popen) then ``read_scan_output()`` before ``run_sps``.
 
 DFT level (Stage 2 scope)
 -------------------------
@@ -48,7 +51,7 @@ from predict_snar.calculators import TSScan
 from predict_snar.data import HARTREE_TO_KCAL
 
 from snar_qc.qc.backend import make_calculator
-from snar_qc.qc.bond_orders import Psi4BondOrders
+from snar_qc.qc.bond_orders import bond_orders_from_calculator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ase import Atoms
@@ -71,10 +74,12 @@ class Psi4TSScan(TSScan):
             replaces the unforwarded Gaussian ``dft_options`` solvent for the Psi4 path.
 
     Attributes:
-        dft: The Psi4 DFT calculator template (B3LYP-D3BJ/def2-SVP).
+        dft: The active-backend DFT calculator template (B3LYP-D3BJ/def2-SVP, via
+            ``make_calculator`` -- Psi4 or gpu4pyscf).
         dft_options: The raw Gaussian-flavoured DFT options (unused in Stage 2).
         dft_energies: DFT energies along the scan (kcal/mol, first point = 0.0).
-        nbo_data: ``Psi4BondOrders`` per scan point (Mayer), in scan order.
+        nbo_data: Per-scan-point Mayer bond orders (``Psi4BondOrders`` on Psi4 /
+            ``PyscfBondOrders`` on the GPU backend), in scan order.
         solvent: The PCMSolver solvent name applied to the DFT single points, or ``None``.
     """
 
@@ -104,9 +109,11 @@ class Psi4TSScan(TSScan):
         self.dft_options = dft_options
 
         # In-memory stashes filled by run_sps and drained by read_sp_output, taking
-        # the place of the Gaussian sps/*.log files in the synchronous Psi4 flow.
+        # the place of the Gaussian sps/*.log files in the synchronous flow. Bond orders
+        # are built eagerly per point (backend-agnostic, via bond_orders_from_calculator)
+        # so neither a Psi4 wavefunction nor a GPU mean-field is held across the scan.
         self._sp_energies: list[float] = []
-        self._sp_wavefunctions: list[Any] = []
+        self._sp_bond_orders: list[Any] = []
 
     # xtb energies live in each scan frame's comment line: ``energy: <Eh> xtb: ...``.
     _SCAN_ENERGY_RE = re.compile(r"energy:\s*(-?\d+\.\d+)")
@@ -178,51 +185,62 @@ class Psi4TSScan(TSScan):
         return energies
 
     def run_sps(self, n_procs: int, mem: float) -> None:
-        """Run a synchronous Psi4 single point for each scan geometry.
+        """Run a synchronous single point for each scan geometry on the active backend.
 
         Each point is computed in-process (no ``Popen``, no ``single_point_job``
-        wait-loop). The energy (Hartree) and the Psi4 wavefunction are stashed on the
-        instance for :meth:`read_sp_output`. Unlike the Gaussian path, which spreads
-        ``n_procs`` across simultaneous jobs with joblib, the points run sequentially
-        and each Psi4 single point is given the full ``n_procs`` (as SCF threads) and
-        ``mem``.
+        wait-loop) through :func:`snar_qc.qc.backend.make_calculator`, so it runs on the
+        configured backend -- Psi4 (default) or gpu4pyscf. The energy (Hartree) and the
+        point's Mayer bond orders (built immediately via
+        :func:`snar_qc.qc.bond_orders.bond_orders_from_calculator`, i.e. ``Psi4BondOrders``
+        on Psi4 / ``PyscfBondOrders`` on the GPU) are stashed for :meth:`read_sp_output`.
+        Building the bond orders eagerly keeps the backend handle (Psi4 wavefunction or GPU
+        mean-field) from being held across the whole scan -- it matters on a 4 GB GPU.
+        Unlike the Gaussian path, which spreads ``n_procs`` across simultaneous jobs with
+        joblib, the points run sequentially; on Psi4 each gets the full ``n_procs`` (SCF
+        threads) and ``mem``, while gpu4pyscf manages its own GPU threading.
 
         Args:
-            n_procs: Number of threads handed to each Psi4 single point.
-            mem: Memory budget (GB) per single point.
+            n_procs: Threads handed to each Psi4 single point (ignored by gpu4pyscf).
+            mem: Memory budget (GB) per Psi4 single point (ignored by gpu4pyscf).
         """
-        # Mirror the base class's per-geometry output directory so Psi4's output
+        # Mirror the base class's per-geometry output directory so any backend output
         # files stay tidy; exist_ok keeps a re-run from blowing up on the dir.
         os.makedirs("sps", exist_ok=True)
 
         calc_options = {"solvent": self.solvent} if self.solvent else None
         energies: list[float] = []
-        wavefunctions: list[Any] = []
+        bond_orders: list[Any] = []
         for counter, geometry in enumerate(self.geometries, start=1):
             calc = make_calculator(
                 atoms=geometry, file=f"sps/{counter}.in", options=calc_options
             )
             energy = calc.single_point(n_procs=n_procs, mem=mem)
             energies.append(energy)
-            wavefunctions.append(calc.wavefunction)
+            bond_orders.append(bond_orders_from_calculator(calc))
+            # Release this point's GPU memory before the next probe: cupy pools its
+            # freed blocks, so without this the driver-visible free VRAM drifts down
+            # across the ~14 scan points and trips the factory probe mid-scan on a 4 GB
+            # card. Duck-typed -- the Psi4 calculator has no such method and skips it.
+            release_memory = getattr(calc, "free_device_memory", None)
+            if callable(release_memory):
+                release_memory()
 
         self._sp_energies = energies
-        self._sp_wavefunctions = wavefunctions
+        self._sp_bond_orders = bond_orders
 
     def read_sp_output(self) -> None:
-        """Populate ``dft_energies`` and ``nbo_data`` from the stashed Psi4 results.
+        """Populate ``dft_energies`` and ``nbo_data`` from the stashed single points.
 
         Energies are converted Hartree -> kcal/mol and referenced to the first scan
         point (first point = 0.0), matching ``TSScan.read_sp_output``'s normalization.
-        ``nbo_data`` is filled with ``Psi4BondOrders`` (Mayer) per scan point, so the
-        inherited ``find_peaks`` / ``validate_peaks`` work unchanged.
+        ``nbo_data`` is the per-point Mayer bond orders stashed by :meth:`run_sps`
+        (``Psi4BondOrders`` on Psi4 / ``PyscfBondOrders`` on the GPU backend), so the
+        inherited ``find_peaks`` / ``validate_peaks`` work unchanged on either backend.
         """
         # Hartree -> kcal/mol, then reference to the first scan point.
         dft_energies = [energy * HARTREE_TO_KCAL for energy in self._sp_energies]
         normalized_energies = [energy - dft_energies[0] for energy in dft_energies]
         self.dft_energies = normalized_energies
 
-        # Bond orders straight off each stashed wavefunction (Mayer via oeprop).
-        self.nbo_data = [
-            Psi4BondOrders(wavefunction) for wavefunction in self._sp_wavefunctions
-        ]
+        # Mayer bond orders, built per point in run_sps (backend-agnostic).
+        self.nbo_data = list(self._sp_bond_orders)

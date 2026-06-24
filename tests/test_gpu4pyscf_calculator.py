@@ -138,6 +138,31 @@ def _nh3() -> Atoms:
     return atoms
 
 
+def _h2o() -> Atoms:
+    """Near-equilibrium H2O (Angstrom), neutral closed shell. Order: O, H, H.
+
+    Same geometry as tests/test_bond_orders.py so the GPU Mayer orders are compared to
+    the very references the Psi4 adapter is pinned against.
+    """
+    atoms = Atoms(
+        symbols=["O", "H", "H"],
+        positions=[
+            (0.0000, 0.0000, 0.1173),
+            (0.0000, 0.7572, -0.4692),
+            (0.0000, -0.7572, -0.4692),
+        ],
+    )
+    atoms.info["charge"] = 0
+    return atoms
+
+
+def _n2(distance: float = 1.10) -> Atoms:
+    """N2 (Angstrom) at a given bond length, neutral closed shell."""
+    atoms = Atoms(symbols=["N", "N"], positions=[(0.0, 0.0, 0.0), (0.0, 0.0, distance)])
+    atoms.info["charge"] = 0
+    return atoms
+
+
 # -- contract tests (no device needed) -------------------------------------------
 
 
@@ -288,10 +313,11 @@ def test_snar_ts_search_one_imaginary_mode():
     """geomeTRIC TS search (analytic-Hessian seed) finds the SNAr saddle: one imag mode.
 
     Stage D, and the masterplan's flagged risk -- geomeTRIC must converge the SNAr saddle
-    that optking's FD-Hessian path located on Psi4. EXPENSIVE (~20 min on the RTX 3050 Ti:
-    two 21-atom analytic Hessians, seed + validate, plus the saddle steps). Pinned to the
-    GPU backend's own converged result as a regression guard; the Psi4 barrier-parity
-    cross-check is deferred (Stage D scoped code-only).
+    that optking's FD-Hessian path located on Psi4. EXPENSIVE (~24 min on the RTX 3050 Ti,
+    measured 2026-06-24: the saddle search's per-step analytic Hessian seed + the saddle
+    steps + the validating Hessian on 21 atoms). Pinned to the GPU backend's own converged
+    result as a regression guard; the Psi4 barrier-parity cross-check is deferred (Stage D
+    scoped code-only).
     """
     calc = GPU4PySCFCalculator(atoms=_ts_guess())
     calc.ts_freq()
@@ -310,3 +336,39 @@ def test_snar_ts_search_one_imaginary_mode():
     thermo = Psi4Thermo.from_calculator(calc)
     assert len(thermo.imaginary_frequencies) == 1
     assert math.isfinite(thermo.gibbs_qh)
+
+
+@pytest.mark.slow
+@requires_gpu_device
+def test_pyscf_bond_orders_mayer_matches_textbook():
+    """PyscfBondOrders reproduces Mayer orders from a GPU mean-field (vs the Psi4 pins).
+
+    This is what lets the relaxed-scan peak validation run GPU-native: the GPU calculator
+    exposes a ``mean_field`` (no Psi4 ``Wavefunction``), and PyscfBondOrders turns it into
+    the same 1-indexed Mayer ``get_bo`` surface ``validate_peaks`` consumes. Same
+    references as the Psi4 adapter (tests/test_bond_orders.py): H2O O-H ~ 1.0 single bond
+    (non-bonded H...H ~ 0), N2 ~ 3.0 triple bond -- so the 0.05/0.5 validate_peaks
+    thresholds read the same bond-order scale on either backend.
+    """
+    from snar_qc.qc.bond_orders import PyscfBondOrders, bond_orders_from_calculator
+
+    water = GPU4PySCFCalculator(atoms=_h2o())
+    water.single_point()
+    bo = PyscfBondOrders(water.mean_field)
+    assert bo.kind == "mayer"
+
+    oh_1 = bo.get_bo(1, 2)  # O-H
+    oh_2 = bo.get_bo(1, 3)  # O-H (equivalent by symmetry)
+    hh = bo.get_bo(2, 3)  # H...H, non-bonded
+    assert 0.9 < oh_1 < 1.1  # single bond ~ 1.0 (Psi4 pin 1.0104)
+    assert bo.get_bo(2, 1) == oh_1  # 1-indexed, symmetric -- NBOParser convention
+    assert abs(oh_1 - oh_2) < 1e-6
+    assert hh < 0.1 and oh_1 > hh
+
+    # The backend factory returns this adapter for a GPU calculator.
+    assert isinstance(bond_orders_from_calculator(water), PyscfBondOrders)
+
+    nitrogen = GPU4PySCFCalculator(atoms=_n2(1.10))
+    nitrogen.single_point()
+    nn = PyscfBondOrders(nitrogen.mean_field).get_bo(1, 2)
+    assert nn > 2.5  # triple bond
