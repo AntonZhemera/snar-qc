@@ -1,48 +1,62 @@
 {
   "metric_column": "delta_g_qh_kcal",
-  "n_substrates_total": 10,
-  "n_completed": 10,
+  "n_substrates_total": 18,
+  "n_completed": 17,
   "completed_lu_ids": [
+    1,
+    3,
+    8,
+    11,
+    12,
+    14,
     17,
     22,
-    27,
     31,
     48,
     57,
     65,
     66,
+    67,
+    69,
     72,
     74
   ],
-  "pearson_r": 0.5242,
-  "pearson_p": 0.1199,
-  "spearman_r": 0.6606,
-  "spearman_p": 0.0376,
-  "mae_kcal": 15.907,
-  "mean_offset_kcal": 15.907,
-  "mae_offset_corrected_kcal": 6.239,
+  "pearson_r": 0.1511,
+  "pearson_p": 0.5627,
+  "spearman_r": 0.375,
+  "spearman_p": 0.138,
+  "mae_kcal": 8.513,
+  "mean_offset_kcal": 6.301,
+  "mae_offset_corrected_kcal": 4.326,
   "computed_range_kcal": [
-    25.26,
-    47.69
+    4.05,
+    37.56
   ],
   "exp_range_kcal": [
     15.3,
     22.85
   ],
   "by_leaving_group": {
+    "Br": {
+      "n": 6,
+      "spearman_r": 1.0,
+      "pearson_r": 0.998,
+      "mean_offset_kcal": 5.25,
+      "mae_offset_corrected_kcal": 1.23
+    },
     "Cl": {
-      "n": 7,
-      "spearman_r": 0.9643,
-      "pearson_r": 0.9773,
-      "mean_offset_kcal": 11.451,
-      "mae_offset_corrected_kcal": 0.881
+      "n": 6,
+      "spearman_r": 0.1429,
+      "pearson_r": -0.3257,
+      "mean_offset_kcal": 1.535,
+      "mae_offset_corrected_kcal": 6.781
     },
     "F": {
-      "n": 3,
-      "spearman_r": 1.0,
-      "pearson_r": 0.8983,
-      "mean_offset_kcal": 26.305,
-      "mae_offset_corrected_kcal": 0.963
+      "n": 5,
+      "spearman_r": 0.6,
+      "pearson_r": 0.8911,
+      "mean_offset_kcal": 13.281,
+      "mae_offset_corrected_kcal": 1.581
     }
   }
 }
