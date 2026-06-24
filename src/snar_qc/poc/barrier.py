@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import predict_snar.config as predict_snar_config
 
+from snar_qc.qc.backend import make_calculator
 from snar_qc.qc.psi4_calculator import Psi4Calculator
 from snar_qc.qc.thermo import Psi4Thermo, activation_free_energy
 from snar_qc.ts.psi4_tsscan import Psi4TSScan
@@ -273,6 +274,10 @@ def _solvated_thermo(
     if not solvent:
         return gas_thermo
     prefix = file.rsplit(".", 1)[0]
+    # Intentionally Psi4, not the backend factory: this is the Psi4 PCM single-point
+    # correction at the gas geometry (it reads the Psi4 wavefunction via
+    # ``_optimised_atoms``). GPU solvation is gated through the solvation-revalidation
+    # plan, so the solvent path stays on Psi4 regardless of the selected backend.
     sp = Psi4Calculator(
         _optimised_atoms(calc), file=f"{prefix}_pcm.in", options={"solvent": solvent}
     )
@@ -306,7 +311,7 @@ def _species_thermo(
     Returns:
         ``(thermo, n_imaginary, electronic_energy_hartree, gibbs_qh_hartree)``.
     """
-    calc = Psi4Calculator(atoms, file=file, options=None)
+    calc = make_calculator(atoms, file=file, options=None)
     calc.opt_freq(n_procs=n_procs, mem=mem)
     n_imag = count_imaginary(calc.frequencies)
     thermo = _solvated_thermo(
@@ -439,7 +444,7 @@ def compute_barrier(
         ts_guess.info["charge"] = rc.atoms.info["charge"]
         # TS opt+freq always in gas phase; the solvent is a PCM single-point correction
         # at the gas saddle (Psi4 has no analytic PCM Hessian -- see _solvated_thermo).
-        ts_calc = Psi4Calculator(ts_guess, file="ts.in", options=None)
+        ts_calc = make_calculator(ts_guess, file="ts.in", options=None)
         ts_calc.ts_freq(n_procs=n_procs, mem=mem)
         result.timing_s["ts_opt_freq"] = time.time() - t0
 

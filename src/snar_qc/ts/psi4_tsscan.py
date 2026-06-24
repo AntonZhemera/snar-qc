@@ -47,8 +47,8 @@ import ase.io
 from predict_snar.calculators import TSScan
 from predict_snar.data import HARTREE_TO_KCAL
 
+from snar_qc.qc.backend import make_calculator
 from snar_qc.qc.bond_orders import Psi4BondOrders
-from snar_qc.qc.psi4_calculator import Psi4Calculator
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ase import Atoms
@@ -99,7 +99,7 @@ class Psi4TSScan(TSScan):
         # orders come from oeprop, so there is no NBO/accuracy flag to honour.
         self.solvent = solvent
         calc_options = {"solvent": solvent} if solvent else None
-        self.dft = Psi4Calculator(atoms, options=calc_options)
+        self.dft = make_calculator(atoms, options=calc_options)
         self.g16 = self.dft
         self.dft_options = dft_options
 
@@ -199,7 +199,7 @@ class Psi4TSScan(TSScan):
         energies: list[float] = []
         wavefunctions: list[Any] = []
         for counter, geometry in enumerate(self.geometries, start=1):
-            calc = Psi4Calculator(
+            calc = make_calculator(
                 atoms=geometry, file=f"sps/{counter}.in", options=calc_options
             )
             energy = calc.single_point(n_procs=n_procs, mem=mem)
