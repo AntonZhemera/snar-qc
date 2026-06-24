@@ -8,12 +8,13 @@ runs the same method -- **B3LYP-D3BJ / def2-SVP** with density fitting -- return
 energy in Hartree. Energy parity with Psi4 at this level was shown to 3x10^-7 Ha on the
 5-ring reference complex (``notes/2026-06-23_gpu_hessian_benchmark.md``).
 
-**Scope so far: gas-phase single point (A), minimisation (B), and frequencies (C).**
+**Scope: gas-phase single point (A), minimisation (B), frequencies (C), TS search (D).**
 ``single_point`` runs an SCF; ``opt`` minimises with geomeTRIC on GPU gradients; ``freq``
-/ ``opt_freq`` build the **analytic** Hessian and harmonic thermochemistry. ``ts`` /
-``ts_freq`` (Stage D) and the PCM solvation path still raise ``NotImplementedError``. The
-Psi4 backend remains the default and the fallback for everything (CPU hosts, large
-substrates, anything exceeding the 4 GB VRAM ceiling).
+/ ``opt_freq`` build the **analytic** Hessian and harmonic thermochemistry; ``ts`` /
+``ts_freq`` locate a saddle (geomeTRIC ``transition=True`` seeded by the analytic Hessian).
+Only the PCM **solvation** path still raises ``NotImplementedError`` (gated to the
+solvation-revalidation plan). The Psi4 backend remains the default and the fallback for
+everything (CPU hosts, large substrates, anything exceeding the 4 GB VRAM ceiling).
 
 **Import discipline (CPU-fallback contract).** This module imports ``pyscf`` /
 ``gpu4pyscf`` / ``cupy`` at *module* scope -- which is exactly why it must only ever be
@@ -69,7 +70,7 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
 
 
 class GPU4PySCFCalculator(Calculator):
-    """Run B3LYP-D3BJ/def2-SVP single points, minimisations, and frequencies on gpu4pyscf.
+    """Run B3LYP-D3BJ/def2-SVP single points, opts, frequencies, and TS searches on gpu4pyscf.
 
     Args:
         atoms: ASE ``Atoms`` carrying the geometry (Angstrom) and the total molecular
@@ -167,7 +168,7 @@ class GPU4PySCFCalculator(Calculator):
 
         return mf
 
-    # -- minimisation -----------------------------------------------------------
+    # -- minimisation / transition-state search ---------------------------------
 
     # Cross-backend aliases onto geomeTRIC coordinate-system names.
     _COORDSYS_ALIASES = {"cartesian": "cart", "internal": "tric"}
@@ -189,6 +190,28 @@ class GPU4PySCFCalculator(Calculator):
         maxsteps = int(self.options.get("geom_maxiter") or 150)
         return optimize(mf, maxsteps=maxsteps, coordsys=self._geometric_coordsys())
 
+    def _run_ts_opt(self, mf: Any) -> "gto.Mole":
+        """Locate a transition state with geomeTRIC, seeded by the analytic Hessian.
+
+        ``transition=True`` runs a saddle search; ``hessian="first"`` builds gpu4pyscf's
+        **analytic** Hessian at the first step to identify the reaction mode (not a
+        finite-difference seed) and BFGS-updates it through the search -- the
+        hours->minutes payoff over the Psi4 optking + FD-Hessian TS path. geomeTRIC's TRIC
+        internals locate the SNAr saddle cleanly (verified on the smoke substrate: one
+        imaginary mode). Returns the optimised ``Mole``; the subsequent ``freq`` validates
+        the single imaginary mode.
+        """
+        from pyscf.geomopt.geometric_solver import optimize  # noqa: PLC0415 -- lazy
+
+        maxsteps = int(self.options.get("geom_maxiter") or 150)
+        return optimize(
+            mf,
+            transition=True,
+            hessian="first",
+            coordsys=self._geometric_coordsys(),
+            maxsteps=maxsteps,
+        )
+
     def _write_optimised_geometry(self, mol: "gto.Mole") -> None:
         """Write the optimised coordinates back onto ``self.atoms`` (Angstrom).
 
@@ -198,15 +221,43 @@ class GPU4PySCFCalculator(Calculator):
         if self.atoms is not None:
             self.atoms.set_positions(mol.atom_coords(unit="Angstrom"))
 
+    # -- transition-state requests ----------------------------------------------
+
+    def ts(self, *args: Any, **kwargs: Any) -> float:
+        """Optimise a transition state (geomeTRIC saddle search, analytic-Hessian seed).
+
+        Mirrors :meth:`Psi4Calculator.ts` -- the inherited ``single_point`` / ``opt`` /
+        ``opt_freq`` / ``freq`` all force ``ts`` off, so a TS request needs its own entry
+        point. The Hessian for the saddle search is gpu4pyscf's analytic one (see
+        :meth:`_run_ts_opt`), not a finite difference.
+        """
+        self.options["opt"] = True
+        self.options["ts"] = True
+        self.options["freq"] = False
+        return self.run_calc(*args, **kwargs)
+
+    def ts_freq(self, *args: Any, **kwargs: Any) -> float:
+        """Optimise a transition state and run a frequency analysis on it.
+
+        Mirrors :meth:`Psi4Calculator.ts_freq`. The frequency run both validates the
+        saddle (one imaginary mode) and captures the thermochemistry :mod:`snar_qc.qc.thermo`
+        needs for ΔG‡.
+        """
+        self.options["opt"] = True
+        self.options["ts"] = True
+        self.options["freq"] = True
+        return self.run_calc(*args, **kwargs)
+
     # -- driver -----------------------------------------------------------------
 
     def run_calc(self, n_procs: int = 1, mem: float = 2.0) -> float:
         """Run the gpu4pyscf calculation selected by the ``opt`` / ``freq`` flags.
 
-        The inherited ``single_point`` / ``opt`` / ``opt_freq`` / ``freq`` set those flags
-        before calling this. Implemented so far: ``single_point`` (Stage A), ``opt``
-        minimisation (Stage B), and ``freq`` / ``opt_freq`` -- analytic-Hessian harmonic
-        thermochemistry (Stage C).
+        The inherited ``single_point`` / ``opt`` / ``opt_freq`` / ``freq`` (and this
+        class's ``ts`` / ``ts_freq``) set those flags before calling this. Implemented:
+        ``single_point`` (A), ``opt`` minimisation (B), ``freq`` / ``opt_freq`` --
+        analytic-Hessian harmonic thermochemistry (C), and ``ts`` / ``ts_freq`` -- a
+        geomeTRIC saddle search seeded by the analytic Hessian (D).
 
         Args:
             n_procs: Accepted for interface parity with ``Psi4Calculator``; gpu4pyscf
@@ -230,19 +281,18 @@ class GPU4PySCFCalculator(Calculator):
                 "(gas phase only); it is gated through the solvation revalidation plan. "
                 "Use the Psi4 backend for solvent runs."
             )
-        if self.options.get("ts"):
-            raise NotImplementedError(
-                "GPU4PySCFCalculator ts / ts_freq are not implemented yet (Stage D); "
-                "single_point / opt / freq are available. Use the Psi4 backend meanwhile."
-            )
 
         mol = self._build_mol()
         mf = self._build_mean_field(mol)
 
         if self.options.get("opt"):
-            # Relax the geometry, then re-build the mean-field on the optimised mol so
-            # self.energy / self.mean_field describe the converged minimum cleanly.
-            mol = self._run_min_opt(mf)
+            # Relax to the stationary point (a minimum, or a saddle for a TS request),
+            # then re-build the mean-field on the optimised geometry so self.energy /
+            # self.mean_field describe the converged stationary point cleanly.
+            if self.options.get("ts"):
+                mol = self._run_ts_opt(mf)
+            else:
+                mol = self._run_min_opt(mf)
             self._write_optimised_geometry(mol)
             mf = self._build_mean_field(mol)
 

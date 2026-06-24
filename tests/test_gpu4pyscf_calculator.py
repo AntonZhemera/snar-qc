@@ -1,4 +1,4 @@
-"""Tests for snar_qc.qc.gpu4pyscf_calculator.GPU4PySCFCalculator (Stages A-B).
+"""Tests for snar_qc.qc.gpu4pyscf_calculator.GPU4PySCFCalculator (Stages A-D).
 
 The whole module is skipped where the optional ``[gpu]`` stack is absent (CI, the
 Windows workstation, CPU-only dev hosts) -- ``gpu4pyscf`` is imported at module scope by
@@ -6,10 +6,12 @@ the calculator, so importing it here requires that stack. The CPU-fallback / fac
 behaviour is covered GPU-free in tests/test_backend.py.
 
 The slow tests are real gpu4pyscf B3LYP-D3BJ/def2-SVP runs (and need a usable CUDA
-device): a single point on NH3 and a geometry minimisation of the rigid aryl-nitrile
-that broke optking, each asserted for **parity** against a pinned reference. The contract
-tests (multiplicity, option merge, coordinate selection, the NotImplementedError guards)
-need only the importable stack, not a device.
+device): an NH3 single point, an aryl-nitrile minimisation, its analytic-Hessian
+frequencies/thermochemistry, and an SNAr transition-state search -- each asserted against
+a pinned reference (vs Psi4 where available; vs the GPU's own converged result for the TS,
+whose Psi4 barrier parity is deferred). The contract tests (multiplicity, option merge,
+coordinate selection, the dispatch-flag and solvation guards) need only the importable
+stack, not a device.
 """
 
 import math
@@ -64,6 +66,46 @@ def _aryl_halide() -> Atoms:
         symbols=[s for s, _ in ARYL_HALIDE_START],
         positions=[p for _, p in ARYL_HALIDE_START],
     )
+    atoms.info["charge"] = 0
+    return atoms
+
+
+# Smoke-substrate SNAr transition state: lu_0 = para-fluoronitrobenzene + methylamine
+# (21 atoms). The TS guess is the relaxed-scan peak (data/processed/poc_smoke/lu_0/scan.xyz);
+# geomeTRIC transition=True seeded by the analytic Hessian relaxes it to a first-order
+# saddle. The energy / imaginary frequency are pinned from the GPU backend's own converged
+# result as a regression guard -- the Psi4 barrier (delta-G-dagger) parity cross-check is
+# DEFERRED (Stage D was scoped "code only, defer the Psi4 reference").
+TS_ENERGY_HARTREE = -631.3593
+TS_IMAG_FREQ_CM = -294.1
+TS_GUESS = [
+    ("O", (3.2164, -0.52209, 0.88584)),
+    ("N", (2.53687, 0.42334, 0.53757)),
+    ("O", (2.98019, 1.51219, 0.22974)),
+    ("C", (1.11587, 0.24705, 0.50234)),
+    ("C", (0.57153, -0.98675, 0.85759)),
+    ("C", (-0.79903, -1.15746, 0.8525)),
+    ("C", (-1.5472, -0.07031, 0.47644)),
+    ("F", (-3.10711, -0.66545, -0.78939)),
+    ("C", (-1.06748, 1.15825, 0.09723)),
+    ("C", (0.30509, 1.31119, 0.1086)),
+    ("H", (1.23191, -1.79623, 1.12923)),
+    ("H", (-1.24735, -2.10496, 1.0966)),
+    ("H", (-1.71808, 1.95222, -0.22633)),
+    ("H", (0.76358, 2.24262, -0.18698)),
+    ("C", (-3.01921, 0.62454, 2.88657)),
+    ("N", (-3.25129, 0.09257, 1.5646)),
+    ("H", (-2.56236, 1.61008, 2.80595)),
+    ("H", (-3.94752, 0.71447, 3.45799)),
+    ("H", (-2.33817, -0.03091, 3.42793)),
+    ("H", (-3.59288, -0.86127, 1.5303)),
+    ("H", (-3.80627, 0.67548, 0.94765)),
+]
+
+
+def _ts_guess() -> Atoms:
+    """The SNAr scan-peak TS guess for lu_0 (neutral, closed shell)."""
+    atoms = Atoms(symbols=[s for s, _ in TS_GUESS], positions=[p for _, p in TS_GUESS])
     atoms.info["charge"] = 0
     return atoms
 
@@ -129,12 +171,24 @@ def test_solvent_not_supported_yet():
         calc.single_point()
 
 
-def test_ts_flag_not_supported_yet():
-    """The ``ts`` guard fires even if the flag is set directly (no ts() until Stage D)."""
+def test_ts_sets_saddle_flags(monkeypatch):
+    """ts() requests an opt + saddle search (opt=ts=True, freq off), then runs."""
     calc = GPU4PySCFCalculator(atoms=_nh3())
-    calc.options["ts"] = True
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
-        calc.run_calc()
+    monkeypatch.setattr(calc, "run_calc", lambda *a, **k: 0.0)
+    calc.ts()
+    assert calc.options["opt"] is True
+    assert calc.options["ts"] is True
+    assert calc.options["freq"] is False
+
+
+def test_ts_freq_sets_saddle_and_freq_flags(monkeypatch):
+    """ts_freq() requests opt + saddle + a validating frequency run."""
+    calc = GPU4PySCFCalculator(atoms=_nh3())
+    monkeypatch.setattr(calc, "run_calc", lambda *a, **k: 0.0)
+    calc.ts_freq()
+    assert calc.options["opt"] is True
+    assert calc.options["ts"] is True
+    assert calc.options["freq"] is True
 
 
 def test_coordsys_default_is_tric():
@@ -225,4 +279,34 @@ def test_aryl_halide_freq_thermo_parity():
 
     thermo = Psi4Thermo.from_calculator(calc)
     assert thermo.imaginary_frequencies == []
+    assert math.isfinite(thermo.gibbs_qh)
+
+
+@pytest.mark.slow
+@requires_gpu_device
+def test_snar_ts_search_one_imaginary_mode():
+    """geomeTRIC TS search (analytic-Hessian seed) finds the SNAr saddle: one imag mode.
+
+    Stage D, and the masterplan's flagged risk -- geomeTRIC must converge the SNAr saddle
+    that optking's FD-Hessian path located on Psi4. EXPENSIVE (~20 min on the RTX 3050 Ti:
+    two 21-atom analytic Hessians, seed + validate, plus the saddle steps). Pinned to the
+    GPU backend's own converged result as a regression guard; the Psi4 barrier-parity
+    cross-check is deferred (Stage D scoped code-only).
+    """
+    calc = GPU4PySCFCalculator(atoms=_ts_guess())
+    calc.ts_freq()
+
+    # A clean first-order saddle: exactly one imaginary mode, the SNAr reaction coordinate.
+    imag = [f for f in calc.frequencies if f < 0.0]
+    assert len(imag) == 1
+    assert abs(imag[0] - TS_IMAG_FREQ_CM) < 20.0
+    assert abs(calc.energy - TS_ENERGY_HARTREE) < 1e-3
+    assert math.isfinite(calc.free_energy)  # thermochemistry captured for the barrier
+
+    # The genuine reaction mode (|nu| well above the 100 cm^-1 soft cutoff) is kept out of
+    # the qRRHO sum, not folded back as a soft rotor.
+    from snar_qc.qc.thermo import Psi4Thermo
+
+    thermo = Psi4Thermo.from_calculator(calc)
+    assert len(thermo.imaginary_frequencies) == 1
     assert math.isfinite(thermo.gibbs_qh)
