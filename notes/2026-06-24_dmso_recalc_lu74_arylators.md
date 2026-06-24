@@ -6,6 +6,8 @@ gas-Hessian + PCM-single-point pipeline (`b8a394f`/`32ae266`/`a072fa4`).
 PCM single points on gas-phase geometries (no PCM Hessian). xTB relaxed scan → DFT scan SPs
 (PCM) → gas TS opt+freq → gas ArX/amine references → ΔG‡(qh) with soft-mode folding.
 **Inputs:** `data/external/lu74_solv_slice.csv` (18), `data/external/qc_test_5ring_arylators.csv` (7).
+Experimental ΔG‡ for the lu74 slice are from the published S~N~Ar reactivity dataset —
+Lu, J.; Paci, I.; Leitch, D. C. *Chem. Sci.* **2022**, *13*, 12681–12695 (DOI 10.1039/d2sc04041g).
 **Outputs:** `data/processed/lu74_solv_dmso/`, `data/processed/qc_5ring_arylators_dmso/`
 (per-substrate `result.json` sidecars + audit `.out`). Validation in `notes/assets/`.
 

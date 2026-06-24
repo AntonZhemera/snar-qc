@@ -81,5 +81,7 @@ TS opt+freq). Error reasons are `<stage>/<type>` from each failed sidecar.
 - `data/processed/realpool_dmso/summary.json` — roll-up of all sidecars.
 - `<ARCHIVE_DIR>/<tag>.zip` — per-task archive copied as each finishes.
 
-`<tag>` is the catalogue code (e.g. `EN300_17347`). On Windows an `--archive-dir` under
-`$env:OneDrive` syncs results for remote viewing.
+`<tag>` is the catalogue code (e.g. `EN300_17347`). Point `--archive-dir` at any
+cloud-synced folder to mirror results for remote viewing as they finish — e.g. on Windows
+`$env:OneDrive`, `$env:Dropbox`, or a Google Drive / iCloud Drive path; on Linux/macOS the
+mounted equivalent (`~/OneDrive`, `~/Dropbox`, `~/"Google Drive"`, `~/Library/Mobile Documents/...`).
