@@ -1,0 +1,45 @@
+# GPU host env (`gpuqc`) for the gpu4pyscf backend -- the GPU-on-device half of the
+# dual-backend split (`snar-qc` = Psi4 + CPU-fallback, `gpuqc` = GPU). Used with
+# SNAR_QC_BACKEND=gpu4pyscf. Validated end to end on an RTX 3050 Ti (4 GB, CUDA 12.x):
+# notes/2026-06-24_gpu_stage_e_unblock.md.
+#
+# Discipline (do not "fix" away):
+# * This is a *pip-wheel* CUDA stack. numpy / scipy / cupy / cuTENSOR / gpu4pyscf are
+#   installed from pip with the CUDA 12.x wheels and PINNED -- conda must not be allowed
+#   to resolve or downgrade them, or the cupy/cuTENSOR ABI breaks. Only Python, xtb, and
+#   their non-Python libs come from conda.
+# * Do NOT add `psi4` here. Psi4 is conda-only and pulls a numpy/scipy + BLAS that would
+#   clobber the pinned CUDA wheels. The GPU path imports no Psi4 (the GPU-needed Psi4
+#   imports are lazy -- snar_qc.qc.bond_orders / snar_qc.poc.barrier), so it is not needed.
+# * xtb (the relaxed-scan CLI) IS required at run time by snar_qc.poc.barrier and is a
+#   standalone Fortran binary (no Python ABI risk), so it is safe as a conda dep.
+name: gpuqc
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  # Relaxed-scan CLI (predict_snar XTBCalculator shells out to it). conda-forge openblas
+  # build -- a self-contained binary, independent of the pip numpy's bundled BLAS.
+  - xtb=6.7.1
+  - pip
+  - pip:
+      # --- GPU backend (CUDA 12.x wheels; the [gpu] extra in pyproject.toml) ----------
+      - gpu4pyscf-cuda12x==1.7.3
+      - cupy-cuda12x==14.1.1
+      - cutensor-cu12==2.7.0
+      # geomeTRIC drives pyscf.geomopt for min-opt and the TS saddle search.
+      - geometric==1.1.1
+      # --- pinned numerics (must match the cupy/gpu4pyscf wheels' ABI) -----------------
+      - numpy==2.4.6
+      - scipy==1.17.1
+      # --- vendored predict_snar runtime deps + snar_qc output stack -------------------
+      - ase==3.29.0
+      - cclib==1.8.1
+      - joblib==1.5.3
+      - mendeleev==1.1.0
+      - matplotlib==3.11.0
+      - pandas==3.0.3
+      - pyarrow==24.0.0
+      - pytest==9.1.1
+      # editable snar_qc itself (run from the repo root)
+      - -e .
