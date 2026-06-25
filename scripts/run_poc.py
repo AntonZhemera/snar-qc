@@ -67,6 +67,7 @@ def _config(args: argparse.Namespace) -> WorkerConfig:
         n_procs=args.n_procs,
         mem=args.mem,
         solvent=args.solvent,
+        solvent_model=args.solvent_model,
         coordinate=args.coordinate,
         retry=args.retry,
         force=args.force,
@@ -94,8 +95,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--solvent",
         default=None,
-        help="PCMSolver solvent name for implicit solvation (e.g. DMSO); "
+        help="continuum solvent name for implicit solvation (e.g. DMSO); "
         "omit for gas phase",
+    )
+    parser.add_argument(
+        "--solvent-model",
+        default=None,
+        help="continuum model for --solvent: iefpcm (default, matches the cpu_dmso "
+        "Psi4 baseline) or smd (GPU backend only). Omit to use the backend default.",
     )
     parser.add_argument(
         "--coordinate",
@@ -116,8 +123,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     Path(args.outdir).mkdir(parents=True, exist_ok=True)
     print(
         f"POC runner: {len(rows)} substrate(s), amine={args.amine}, "
-        f"solvent={args.solvent or 'gas'}, coordinate={args.coordinate}, "
-        f"outdir={args.outdir}"
+        f"solvent={args.solvent or 'gas'}"
+        f"{('/' + args.solvent_model) if (args.solvent and args.solvent_model) else ''}, "
+        f"coordinate={args.coordinate}, outdir={args.outdir}"
     )
 
     cfg = _config(args)

@@ -15,6 +15,7 @@ stack, not a device.
 """
 
 import math
+import types
 
 import pytest
 from ase import Atoms
@@ -189,11 +190,63 @@ def test_charge_read_from_atoms():
     assert calc.options["charge"] == 0
 
 
-def test_solvent_not_supported_yet():
-    """A configured solvent raises (gas phase only); it does not run silently."""
+class _FakeSolventMF:
+    """Mimics the gpu4pyscf mean-field solvation surface for ``_apply_solvent`` unit tests.
+
+    ``mf.PCM()`` / ``mf.SMD()`` each return a fresh handle carrying a ``with_solvent``
+    namespace whose attributes the calculator sets -- exactly the gpu4pyscf contract,
+    without needing a CUDA device or an SCF.
+    """
+
+    def __init__(self, kind: str | None = None) -> None:
+        self.kind = kind
+        self.with_solvent = types.SimpleNamespace()
+
+    def PCM(self) -> "_FakeSolventMF":
+        return _FakeSolventMF(kind="pcm")
+
+    def SMD(self) -> "_FakeSolventMF":
+        return _FakeSolventMF(kind="smd")
+
+
+def test_solvent_model_default_is_iefpcm():
+    """The default continuum model matches the cpu_dmso Psi4 IEFPCM baseline."""
+    assert GPU4PySCFCalculator(atoms=_nh3()).options["solvent_model"] == "iefpcm"
+
+
+def test_apply_solvent_iefpcm_sets_method_and_eps():
+    """The default (IEF-PCM) path sets the method and the solvent dielectric."""
     calc = GPU4PySCFCalculator(atoms=_nh3(), options={"solvent": "DMSO"})
-    with pytest.raises(NotImplementedError, match="solvation"):
-        calc.single_point()
+    mf = calc._apply_solvent(_FakeSolventMF())
+    assert mf.kind == "pcm"
+    assert mf.with_solvent.method == "IEF-PCM"
+    assert mf.with_solvent.eps == pytest.approx(46.826)
+
+
+def test_apply_solvent_smd_sets_solvent_name():
+    """SMD (a model the Psi4 path lacks) sets the gpu4pyscf SMD solvent key."""
+    calc = GPU4PySCFCalculator(
+        atoms=_nh3(), options={"solvent": "DMSO", "solvent_model": "smd"}
+    )
+    mf = calc._apply_solvent(_FakeSolventMF())
+    assert mf.kind == "smd"
+    assert mf.with_solvent.solvent == "dimethylsulfoxide"
+
+
+def test_apply_solvent_unknown_model_raises():
+    """An unrecognised solvent_model fails loudly rather than silently going gas."""
+    calc = GPU4PySCFCalculator(
+        atoms=_nh3(), options={"solvent": "DMSO", "solvent_model": "bogus"}
+    )
+    with pytest.raises(ValueError, match="solvent_model"):
+        calc._apply_solvent(_FakeSolventMF())
+
+
+def test_apply_solvent_unknown_solvent_raises():
+    """A PCM solvent with no tabulated dielectric raises rather than defaulting to water."""
+    calc = GPU4PySCFCalculator(atoms=_nh3(), options={"solvent": "unobtanium"})
+    with pytest.raises(ValueError, match="dielectric"):
+        calc._apply_solvent(_FakeSolventMF())
 
 
 def test_ts_sets_saddle_flags(monkeypatch):
@@ -253,6 +306,27 @@ def test_nh3_single_point_energy_parity():
     # A single point captures no thermochemistry.
     assert calc.free_energy is None
     assert calc.frequencies is None
+
+
+@pytest.mark.slow
+@requires_gpu_device
+def test_dmso_solvation_shifts_single_point_energy():
+    """IEF-PCM and SMD each stabilise the solute below gas, and the two models differ.
+
+    The implicit continuum lowers the electronic energy of a polar solute (H2O) versus
+    gas phase; IEF-PCM and SMD are different physics, so they must not coincide. This is
+    the end-to-end on-device check that ``_apply_solvent`` actually engages the SCF (the
+    unit tests above only verify the option wiring).
+    """
+    gas = GPU4PySCFCalculator(atoms=_h2o()).single_point()
+    pcm = GPU4PySCFCalculator(atoms=_h2o(), options={"solvent": "DMSO"}).single_point()
+    smd = GPU4PySCFCalculator(
+        atoms=_h2o(), options={"solvent": "DMSO", "solvent_model": "smd"}
+    ).single_point()
+
+    assert math.isfinite(pcm) and math.isfinite(smd)
+    assert pcm < gas  # reaction field stabilises the polar solute
+    assert abs(smd - pcm) > 1e-4  # distinct continuum models -> distinct energies
 
 
 @pytest.mark.slow

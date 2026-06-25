@@ -36,6 +36,7 @@ class WorkerConfig:
     n_procs: int = 4
     mem: float = 6.0
     solvent: Optional[str] = None
+    solvent_model: Optional[str] = None
     coordinate: str = "concerted"
     retry: bool = False
     force: bool = False
@@ -129,6 +130,7 @@ def run_substrate(
             mem=cfg.mem,
             lu_id=lu_id,
             solvent=cfg.solvent,
+            solvent_model=cfg.solvent_model,
             coordinate=cfg.coordinate,
         )
     finally:

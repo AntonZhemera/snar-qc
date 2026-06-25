@@ -46,8 +46,17 @@ class _RecordingScan:
 
     instances: list["_RecordingScan"] = []
 
-    def __init__(self, atoms, xtb_options, dft_options, general_options, solvent=None):
+    def __init__(
+        self,
+        atoms,
+        xtb_options,
+        dft_options,
+        general_options,
+        solvent=None,
+        solvent_model=None,
+    ):
         self.solvent = solvent
+        self.solvent_model = solvent_model
         self.scans: list[tuple] = []
         self.constraints: list[tuple] = []
         _RecordingScan.instances.append(self)
@@ -131,13 +140,17 @@ def test_concerted_coordinate_builds_two_scans(monkeypatch):
     """The concerted coordinate drives both the forming and breaking bonds."""
     monkeypatch.setattr(barrier, "Psi4TSScan", _RecordingScan)
     _RecordingScan.instances.clear()
-    result = barrier.compute_barrier(_FakeRC(), solvent="DMSO", coordinate="concerted")
+    result = barrier.compute_barrier(
+        _FakeRC(), solvent="DMSO", solvent_model="smd", coordinate="concerted"
+    )
     scan = _RecordingScan.instances[-1]
     assert len(scan.scans) == 2  # C...Nu and C-LG
     assert len(scan.constraints) == 2
     assert scan.solvent == "DMSO"  # solvent threaded into the scan
+    assert scan.solvent_model == "smd"  # model threaded into the scan
     assert result.coordinate == "concerted"
     assert result.solvent == "DMSO"
+    assert result.solvent_model == "smd"  # recorded on the result for provenance
 
 
 def test_addition_coordinate_builds_one_scan(monkeypatch):
@@ -149,6 +162,28 @@ def test_addition_coordinate_builds_one_scan(monkeypatch):
     assert len(scan.scans) == 1  # only C...Nu
     assert len(scan.constraints) == 1
     assert result.coordinate == "addition"
+
+
+def test_optimised_atoms_reads_gpu_atoms_when_no_wavefunction():
+    """GPU backend (no wavefunction): the optimised geometry is read off ``calc.atoms``.
+
+    The gpu4pyscf calculator writes the relaxed coordinates back onto ``calc.atoms`` and
+    exposes ``mean_field`` (not ``wavefunction``), so ``_optimised_atoms`` must dispatch
+    on the absent wavefunction and return a copy of those atoms carrying the charge.
+    """
+    from ase import Atoms
+
+    relaxed = Atoms("HH", positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.74)])
+
+    class _FakeGPUCalc:
+        wavefunction = None
+        atoms = relaxed
+        options = {"charge": 0}
+
+    opt = barrier._optimised_atoms(_FakeGPUCalc())
+    assert list(opt.get_chemical_symbols()) == ["H", "H"]
+    assert opt.info["charge"] == 0
+    assert opt is not relaxed  # a copy, not the live atoms
 
 
 def test_barrier_result_records_coordinate_and_solvent_defaults():
@@ -164,6 +199,7 @@ def test_barrier_result_records_coordinate_and_solvent_defaults():
     restored = json.loads(json.dumps(result.to_dict()))
     assert restored["coordinate"] == "concerted"
     assert restored["solvent"] is None
+    assert restored["solvent_model"] is None
 
 
 def test_barrier_result_json_round_trip():

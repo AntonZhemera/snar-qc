@@ -8,13 +8,17 @@ runs the same method -- **B3LYP-D3BJ / def2-SVP** with density fitting -- return
 energy in Hartree. Energy parity with Psi4 at this level was shown to 3x10^-7 Ha on the
 5-ring reference complex (``notes/2026-06-23_gpu_hessian_benchmark.md``).
 
-**Scope: gas-phase single point (A), minimisation (B), frequencies (C), TS search (D).**
-``single_point`` runs an SCF; ``opt`` minimises with geomeTRIC on GPU gradients; ``freq``
-/ ``opt_freq`` build the **analytic** Hessian and harmonic thermochemistry; ``ts`` /
-``ts_freq`` locate a saddle (geomeTRIC ``transition=True`` seeded by the analytic Hessian).
-Only the PCM **solvation** path still raises ``NotImplementedError`` (gated to the
-solvation-revalidation plan). The Psi4 backend remains the default and the fallback for
-everything (CPU hosts, large substrates, anything exceeding the 4 GB VRAM ceiling).
+**Scope: single point (A), minimisation (B), frequencies (C), TS search (D), implicit
+solvation (E).** ``single_point`` runs an SCF; ``opt`` minimises with geomeTRIC on GPU
+gradients; ``freq`` / ``opt_freq`` build the **analytic** Hessian and harmonic
+thermochemistry; ``ts`` / ``ts_freq`` locate a saddle (geomeTRIC ``transition=True``
+seeded by the analytic Hessian). A ``solvent`` adds an implicit continuum on the SCF via
+either **IEF-PCM** or **SMD** (``solvent_model``); SMD is a capability the Psi4 1.10.2
+path lacks (it is IEFPCM-only). The barrier pipeline requests a solvent only on *single
+points* (gas-geometry + implicit-solvent SP correction; see
+``barrier._solvated_thermo``), matching the ``cpu_dmso`` recipe, so gas-phase opt/freq are
+unaffected. The Psi4 backend remains the default and the fallback for everything (CPU
+hosts, large substrates, anything exceeding the 4 GB VRAM ceiling).
 
 **Import discipline (CPU-fallback contract).** This module imports ``pyscf`` /
 ``gpu4pyscf`` / ``cupy`` at *module* scope -- which is exactly why it must only ever be
@@ -45,7 +49,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 # Default DFT level: B3LYP-D3BJ / def2-SVP with density fitting -- mirrors
 # ``Psi4Calculator``'s option surface so the two backends are interchangeable behind
-# the factory. ``solvent`` is carried for surface parity but rejected in Stage A.
+# the factory. ``solvent`` is a continuum solvent name (e.g. "DMSO"); ``solvent_model``
+# selects the continuum model applied when it is set.
 _DEFAULT_OPTIONS: dict[str, Any] = {
     "functional": "b3lyp",
     "basis_set": "def2-svp",
@@ -57,6 +62,11 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
     "scf_type": "df",  # density fitting (parity with Psi4 scf_type="df")
     "reference": None,  # resolved per-calculation from multiplicity (rks / uks)
     "solvent": None,
+    # Continuum model used when ``solvent`` is set: "iefpcm" (default, matches the
+    # cpu_dmso Psi4 IEFPCM baseline for an engine-parity check) or "smd" (a more
+    # accurate model gpu4pyscf offers but Psi4 1.10.2 cannot). Also accepts the other
+    # gpu4pyscf PCM variants ("cpcm" / "cosmo" / "ssvpe").
+    "solvent_model": "iefpcm",
     # Coordinate system for a minimisation (the opt path). geomeTRIC's native TRIC,
     # not the Psi4 path's "cartesian": optking's *redundant internals* went degenerate
     # on rigid planar aryl nitriles (near-linear C#N), forcing Psi4 onto Cartesians,
@@ -66,6 +76,41 @@ _DEFAULT_OPTIONS: dict[str, Any] = {
     # aliased to "cart" for cross-backend option parity.
     "min_opt_coordinates": "tric",
     "geom_maxiter": 150,  # geomeTRIC step cap (mirrors the Psi4 optking cap)
+}
+
+# PCM model names -> gpu4pyscf ``with_solvent.method`` strings. "iefpcm" is the default
+# (it is the model the cpu_dmso Psi4 baseline used, so a GPU IEF-PCM run is the
+# apples-to-apples engine-parity check).
+_PCM_METHODS: dict[str, str] = {
+    "iefpcm": "IEF-PCM",
+    "cpcm": "C-PCM",
+    "cosmo": "COSMO",
+    "ssvpe": "SS(V)PE",
+}
+
+# Static dielectric constants (298 K) for the PCM ``eps``, keyed by upper-cased solvent
+# name. gpu4pyscf's PCM takes ``eps`` directly (no built-in solvent table), so unknown
+# solvents must fail loudly rather than silently defaulting to water. Extend as needed.
+_SOLVENT_EPS: dict[str, float] = {
+    "WATER": 78.3553,
+    "DMSO": 46.826,
+    "ACETONITRILE": 35.688,
+    "METHANOL": 32.613,
+    "ETHANOL": 24.852,
+    "ACETONE": 20.493,
+    "DICHLOROMETHANE": 8.93,
+    "THF": 7.4257,
+    "CHLOROFORM": 4.7113,
+    "TOLUENE": 2.3741,
+}
+
+# Solvent name -> gpu4pyscf SMD solvent key. SMD's descriptor table (``solvent_db``) is
+# keyed by full chemical names; most of our solvents match a plain lower-casing
+# (water / acetonitrile / methanol / ethanol / acetone / chloroform / toluene /
+# dichloromethane), so map only the few that differ.
+_SMD_SOLVENT_ALIASES: dict[str, str] = {
+    "DMSO": "dimethylsulfoxide",
+    "THF": "tetrahydrofuran",
 }
 
 
@@ -166,6 +211,46 @@ class GPU4PySCFCalculator(Calculator):
         if dispersion:
             mf.disp = dispersion  # gpu4pyscf D3BJ via the dftd3 integration
 
+        if self.options.get("solvent"):
+            mf = self._apply_solvent(mf)
+
+        return mf
+
+    def _apply_solvent(self, mf: Any) -> Any:
+        """Wrap the mean-field in an implicit continuum solvent (IEF-PCM or SMD).
+
+        The continuum enters on the SCF, so the energy ``run_calc`` returns is the
+        solvated one. The barrier pipeline only ever sets ``solvent`` on single points
+        (gas-geometry + implicit-solvent SP correction; see
+        :func:`snar_qc.poc.barrier._solvated_thermo`), so this never perturbs the
+        gas-phase opt/freq. ``solvent_model`` picks the model: a PCM variant
+        (default IEF-PCM, matching the cpu_dmso Psi4 baseline) takes the dielectric from
+        :data:`_SOLVENT_EPS`; ``"smd"`` uses gpu4pyscf's SMD descriptor table directly.
+        """
+        solvent = str(self.options["solvent"])
+        model = (self.options.get("solvent_model") or "iefpcm").strip().lower()
+
+        if model == "smd":
+            mf = mf.SMD()
+            key = solvent.upper()
+            mf.with_solvent.solvent = _SMD_SOLVENT_ALIASES.get(key, solvent.lower())
+            return mf
+
+        if model not in _PCM_METHODS:
+            raise ValueError(
+                f"Unknown solvent_model {model!r}; expected 'smd' or one of "
+                f"{sorted(_PCM_METHODS)}."
+            )
+        try:
+            eps = _SOLVENT_EPS[solvent.upper()]
+        except KeyError as exc:
+            raise ValueError(
+                f"No dielectric constant for solvent {solvent!r}; add it to "
+                f"_SOLVENT_EPS (known: {sorted(_SOLVENT_EPS)})."
+            ) from exc
+        mf = mf.PCM()
+        mf.with_solvent.method = _PCM_METHODS[model]
+        mf.with_solvent.eps = eps
         return mf
 
     # -- minimisation / transition-state search ---------------------------------
@@ -274,13 +359,6 @@ class GPU4PySCFCalculator(Calculator):
         # Fresh result each call: a reused calculator must not report stale thermo
         # (e.g. a single_point after a freq run leaves these None, as Psi4 does).
         self.free_energy = self.enthalpy = self.zpve = self.frequencies = None
-
-        if self.options.get("solvent"):
-            raise NotImplementedError(
-                "GPU4PySCFCalculator solvation (PCM/SMD) is not implemented yet "
-                "(gas phase only); it is gated through the solvation revalidation plan. "
-                "Use the Psi4 backend for solvent runs."
-            )
 
         mol = self._build_mol()
         mf = self._build_mean_field(mol)

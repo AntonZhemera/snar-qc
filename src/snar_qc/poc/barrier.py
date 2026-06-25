@@ -17,15 +17,17 @@ This is the Stage 4 glue that wires the Stage 1-3 pieces into one substrate run:
    quasi-harmonic Gibbs free energy.
 
 Solvation and coordinate (added for the cross-leaving-group re-validation). A ``solvent``
-argument adds implicit solvation as a **PCM single-point correction on gas-phase
+argument adds implicit solvation as a **continuum single-point correction on gas-phase
 geometries and Hessians**: every opt+freq (TS and both references) runs in gas phase,
-then a single PCM SCF at each gas geometry shifts the energetics by E(PCM) - E(gas)
-while keeping the gas thermal corrections. This is deliberate -- Psi4 has no analytic PCM
-gradients or Hessian, so a *solvent-phase* freq falls back to a double finite difference
-(thousands of PCM-SCF displacements: hours of wall time and tens of GB of RAM), whereas
-the SP correction captures the dominant electrostatic solvation at one SCF. The relaxed
-scan's DFT single points still use PCM directly (single points have no such cost).
-``None`` keeps the whole chain gas phase. A
+then a single solvent SCF at each gas geometry shifts the energetics by E(solv) - E(gas)
+while keeping the gas thermal corrections. This is deliberate -- a *solvent-phase* freq
+on Psi4 falls back to a double finite difference (thousands of PCM-SCF displacements:
+hours of wall time and tens of GB of RAM), whereas the SP correction captures the
+dominant electrostatic solvation at one SCF. The SP runs on the active backend; a
+``solvent_model`` selects the continuum model (default IEF-PCM, matching the ``cpu_dmso``
+Psi4 baseline; the GPU backend also offers ``"smd"``, which Psi4 1.10.2 cannot). The
+relaxed scan's DFT single points use the same continuum directly (single points have no
+such cost). ``None`` keeps the whole chain gas phase. A
 ``coordinate`` argument selects the relaxed-scan coordinate: ``"concerted"`` (the
 gas-phase-validated antisymmetric d(C-Nu) - d(C-LG) scan) or ``"addition"`` (scan only
 the forming C...Nu bond). The choice is recorded on the result and never auto-switched.
@@ -65,7 +67,6 @@ from snar_qc.ts.psi4_tsscan import Psi4TSScan
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from snar_qc.poc.complex import ReactionComplex
-    from snar_qc.qc.psi4_calculator import Psi4Calculator
 
 # Scan defaults. The S~N~Ar reaction coordinate is the *antisymmetric* combination
 # d(C-Nu) - d(C-LG): a concerted relaxed scan that forms the C...Nu bond while breaking
@@ -192,6 +193,7 @@ class BarrierResult:
     reference: str = "separated_reactants"
     coordinate: str = "concerted"
     solvent: Optional[str] = None
+    solvent_model: Optional[str] = None
     peak_index: Optional[int] = None
     n_scan_points: Optional[int] = None
     scan_dft_energies_kcal: list[float] = field(default_factory=list)
@@ -228,14 +230,22 @@ def _configure_engine() -> None:
 _BOHR_TO_ANGSTROM = 0.52917721067
 
 
-def _optimised_atoms(calc: "Psi4Calculator") -> Any:
-    """ASE ``Atoms`` for the optimised geometry on a calculator's captured wavefunction.
+def _optimised_atoms(calc: Any) -> Any:
+    """ASE ``Atoms`` for the optimised geometry, read back per backend.
 
     Psi4 optimises its own internal molecule, leaving the input ``Atoms`` untouched, so
     the relaxed geometry is read back off ``calc.wavefunction.molecule()`` (Bohr ->
-    Angstrom) to seed a follow-up single point.
+    Angstrom). The gpu4pyscf backend instead writes the optimised coordinates straight
+    back onto ``calc.atoms`` (it exposes ``mean_field``, not ``wavefunction``), so the
+    relaxed geometry is just a copy of those atoms -- used to seed the follow-up
+    implicit-solvent single point on either backend.
     """
     from ase import Atoms
+
+    if getattr(calc, "wavefunction", None) is None:
+        opt = calc.atoms.copy()
+        opt.info.setdefault("charge", int(calc.options.get("charge") or 0))
+        return opt
 
     mol = calc.wavefunction.molecule()
     symbols = [mol.symbol(i).capitalize() for i in range(mol.natom())]
@@ -254,36 +264,37 @@ def _optimised_atoms(calc: "Psi4Calculator") -> Any:
 
 def _solvated_thermo(
     gas_thermo: Psi4Thermo,
-    calc: "Psi4Calculator",
+    calc: Any,
     file: str,
     n_procs: int,
     mem: float,
     solvent: Optional[str],
+    solvent_model: Optional[str] = None,
 ) -> Psi4Thermo:
     """Apply an implicit solvent as a single-point correction on gas-phase thermochem.
 
     Gas phase (``solvent`` None): returns ``gas_thermo`` unchanged. With a ``solvent``:
-    runs one PCM single point at the gas-optimised geometry and shifts every energy term
-    by ``E(PCM) - E(gas)``, keeping the gas-phase Hessian's thermal corrections, ZPVE
-    and frequencies. This is the standard gas-geometry + implicit-solvent single-point
-    protocol. It deliberately sidesteps a *solvent* opt+freq: Psi4 has no analytic PCM
-    gradients or Hessian, so a PCM frequency falls back to a double finite difference
-    (thousands of PCM-SCF displacements -- hours of compute and tens of GB of memory),
-    whereas the SP correction captures the dominant electrostatic solvation at one SCF.
+    runs one implicit-solvent single point at the gas-optimised geometry and shifts every
+    energy term by ``E(solv) - E(gas)``, keeping the gas-phase Hessian's thermal
+    corrections, ZPVE and frequencies. This is the standard gas-geometry +
+    implicit-solvent single-point protocol. It deliberately sidesteps a *solvent*
+    opt+freq: it captures the dominant electrostatic solvation at one SCF, and on the
+    Psi4 path a PCM frequency would fall back to a double finite difference (thousands of
+    PCM-SCF displacements). The single point runs on the **active backend** (the GPU
+    backend offers IEF-PCM and SMD; ``solvent_model`` selects, defaulting to the
+    calculator's IEF-PCM), so a GPU chain stays on the GPU instead of needing Psi4.
     """
     if not solvent:
         return gas_thermo
     prefix = file.rsplit(".", 1)[0]
-    # Intentionally Psi4, not the backend factory: this is the Psi4 PCM single-point
-    # correction at the gas geometry (it reads the Psi4 wavefunction via
-    # ``_optimised_atoms``). GPU solvation is gated through the solvation-revalidation
-    # plan, so the solvent path stays on Psi4 regardless of the selected backend.
-    # Lazy import keeps the gas-phase GPU chain (gpuqc env, no Psi4) importable: this
-    # branch is only reached when a solvent is requested, which the GPU path is not.
-    from snar_qc.qc.psi4_calculator import Psi4Calculator  # noqa: PLC0415
-
-    sp = Psi4Calculator(
-        _optimised_atoms(calc), file=f"{prefix}_pcm.in", options={"solvent": solvent}
+    # The implicit-solvent SP correction at the gas geometry, on whichever backend the
+    # rest of the chain uses (read back via ``_optimised_atoms``, which dispatches on the
+    # calculator's wavefunction vs mean_field handle).
+    sp_options: dict[str, Any] = {"solvent": solvent}
+    if solvent_model:
+        sp_options["solvent_model"] = solvent_model
+    sp = make_calculator(
+        _optimised_atoms(calc), file=f"{prefix}_pcm.in", options=sp_options
     )
     e_pcm = sp.single_point(n_procs=n_procs, mem=mem)
     shift = e_pcm - gas_thermo.electronic_energy
@@ -298,19 +309,26 @@ def _solvated_thermo(
 
 
 def _species_thermo(
-    atoms: Any, file: str, n_procs: int, mem: float, solvent: Optional[str] = None
+    atoms: Any,
+    file: str,
+    n_procs: int,
+    mem: float,
+    solvent: Optional[str] = None,
+    solvent_model: Optional[str] = None,
 ) -> tuple[Psi4Thermo, int, float, float]:
     """Optimise + frequency-analyse a reference species and bundle its thermochemistry.
 
     Geometry and Hessian are always gas phase; an implicit ``solvent`` is applied as a
-    PCM single-point correction at the gas geometry (see :func:`_solvated_thermo`).
+    single-point correction at the gas geometry (see :func:`_solvated_thermo`).
 
     Args:
         atoms: ASE ``Atoms`` for the species (carries ``info["charge"]``).
-        file: Psi4 output-file base name.
-        n_procs: Threads for the Psi4 calculation.
+        file: output-file base name.
+        n_procs: Threads for the calculation.
         mem: Memory budget (GB).
-        solvent: Optional PCMSolver solvent name; ``None`` runs the species in gas phase.
+        solvent: Optional continuum solvent name; ``None`` runs the species in gas phase.
+        solvent_model: Optional continuum model for the SP correction (e.g. ``"iefpcm"``
+            / ``"smd"`` on the GPU backend); ``None`` uses the calculator's default.
 
     Returns:
         ``(thermo, n_imaginary, electronic_energy_hartree, gibbs_qh_hartree)``.
@@ -319,7 +337,7 @@ def _species_thermo(
     calc.opt_freq(n_procs=n_procs, mem=mem)
     n_imag = count_imaginary(calc.frequencies)
     thermo = _solvated_thermo(
-        Psi4Thermo.from_calculator(calc), calc, file, n_procs, mem, solvent
+        Psi4Thermo.from_calculator(calc), calc, file, n_procs, mem, solvent, solvent_model
     )
     return thermo, n_imag, thermo.electronic_energy, thermo.gibbs_qh
 
@@ -335,6 +353,7 @@ def compute_barrier(
     make_plot: bool = True,
     lu_id: Optional[int] = None,
     solvent: Optional[str] = None,
+    solvent_model: Optional[str] = None,
     coordinate: str = "concerted",
 ) -> BarrierResult:
     """Compute ΔG‡ for one reaction complex, returning a status-carrying result.
@@ -354,9 +373,14 @@ def compute_barrier(
         mem: Memory budget (GB) per Psi4 calculation.
         make_plot: Whether to write the engine's scan plot (``GSM.png``).
         lu_id: Optional Lu_74 identifier, copied onto the result.
-        solvent: Optional PCMSolver solvent name (e.g. ``"DMSO"``). When set, the scan
-            DFT single points, the TS opt+freq, and both reference opt+freqs all run with
-            the PCM implicit-solvation path; ``None`` keeps the whole chain gas phase.
+        solvent: Optional continuum solvent name (e.g. ``"DMSO"``). When set, the scan
+            DFT single points and the implicit-solvent SP corrections on the gas TS and
+            both references run with the continuum-solvation path; ``None`` keeps the
+            whole chain gas phase.
+        solvent_model: Optional continuum model used when ``solvent`` is set. ``None``
+            (default) uses the active calculator's default (IEF-PCM, matching the
+            ``cpu_dmso`` Psi4 baseline). On the GPU backend ``"smd"`` selects SMD (a model
+            the Psi4 path cannot provide). Recorded on the result.
         coordinate: Reaction coordinate for the relaxed scan. ``"concerted"`` (default)
             drives the antisymmetric d(C-Nu) - d(C-LG) coordinate (Nu in *and* LG out),
             the gas-phase-validated path. ``"addition"`` scans only the forming C...Nu
@@ -377,6 +401,7 @@ def compute_barrier(
         lg_atom=rc.lg_atom,
         lu_id=lu_id,
         solvent=solvent,
+        solvent_model=solvent_model,
         coordinate=coordinate,
     )
     if coordinate not in ("concerted", "addition"):
@@ -397,7 +422,9 @@ def compute_barrier(
         # --- 1. relaxed scan along the chosen reaction coordinate --------------
         result.stage = "scan"
         t0 = time.time()
-        scan = Psi4TSScan(rc.atoms, {}, {}, general_options, solvent=solvent)
+        scan = Psi4TSScan(
+            rc.atoms, {}, {}, general_options, solvent=solvent, solvent_model=solvent_model
+        )
         start_nu = float(rc.atoms.get_distance(rc.central_atom - 1, rc.nu_atom - 1))
         # The forming C...Nu bond is always scanned inwards.
         scan.constrain_bond(rc.central_atom, rc.nu_atom, "auto")
@@ -446,8 +473,9 @@ def compute_barrier(
         t0 = time.time()
         ts_guess = scan.geometries[peak_index].copy()
         ts_guess.info["charge"] = rc.atoms.info["charge"]
-        # TS opt+freq always in gas phase; the solvent is a PCM single-point correction
-        # at the gas saddle (Psi4 has no analytic PCM Hessian -- see _solvated_thermo).
+        # TS opt+freq always in gas phase; the solvent enters as an implicit-solvent
+        # single-point correction at the gas saddle (matches the cpu_dmso recipe; see
+        # _solvated_thermo).
         ts_calc = make_calculator(ts_guess, file="ts.in", options=None)
         ts_calc.ts_freq(n_procs=n_procs, mem=mem)
         result.timing_s["ts_opt_freq"] = time.time() - t0
@@ -462,7 +490,13 @@ def compute_barrier(
         n_imag_significant = count_significant_imaginary(ts_calc.frequencies)
         result.n_imag_ts_soft = n_imag - n_imag_significant
         ts_thermo = _solvated_thermo(
-            Psi4Thermo.from_calculator(ts_calc), ts_calc, "ts.in", n_procs, mem, solvent
+            Psi4Thermo.from_calculator(ts_calc),
+            ts_calc,
+            "ts.in",
+            n_procs,
+            mem,
+            solvent,
+            solvent_model,
         )
         result.ts_energy_hartree = ts_thermo.electronic_energy
         result.ts_gibbs_qh_hartree = ts_thermo.gibbs_qh
@@ -474,7 +508,7 @@ def compute_barrier(
         t0 = time.time()
         arx_atoms = build_molecule(rc.aryl_halide_smiles)
         arx_thermo, n_imag_arx, arx_e, arx_gqh = _species_thermo(
-            arx_atoms, "arx.in", n_procs, mem, solvent=solvent
+            arx_atoms, "arx.in", n_procs, mem, solvent=solvent, solvent_model=solvent_model
         )
         result.timing_s["arx_opt_freq"] = time.time() - t0
         result.n_imag_arx = n_imag_arx
@@ -485,7 +519,12 @@ def compute_barrier(
         t0 = time.time()
         amine_atoms = build_molecule(rc.amine_smiles)
         amine_thermo, n_imag_amine, amine_e, amine_gqh = _species_thermo(
-            amine_atoms, "amine.in", n_procs, mem, solvent=solvent
+            amine_atoms,
+            "amine.in",
+            n_procs,
+            mem,
+            solvent=solvent,
+            solvent_model=solvent_model,
         )
         result.timing_s["amine_opt_freq"] = time.time() - t0
         result.n_imag_amine = n_imag_amine

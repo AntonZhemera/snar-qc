@@ -68,10 +68,12 @@ class Psi4TSScan(TSScan):
             (see the module docstring).
         general_options: Carries ``central_atom`` / ``nu_atom`` / ``lg_atom`` (handled
             identically to the base class).
-        solvent: Optional PCMSolver solvent name (e.g. ``"DMSO"``). When set, every DFT
-            single point along the scan runs with the ``Psi4Calculator`` PCM path; left
-            ``None`` the scan single points are gas phase (the original behaviour). This
-            replaces the unforwarded Gaussian ``dft_options`` solvent for the Psi4 path.
+        solvent: Optional continuum solvent name (e.g. ``"DMSO"``). When set, every DFT
+            single point along the scan runs with the active backend's continuum-solvation
+            path; left ``None`` the scan single points are gas phase (the original
+            behaviour). This replaces the unforwarded Gaussian ``dft_options`` solvent.
+        solvent_model: Optional continuum model for the scan SPs (e.g. ``"iefpcm"`` /
+            ``"smd"`` on the GPU backend); ``None`` uses the calculator's default.
 
     Attributes:
         dft: The active-backend DFT calculator template (B3LYP-D3BJ/def2-SVP, via
@@ -90,6 +92,7 @@ class Psi4TSScan(TSScan):
         dft_options: dict[str, Any],
         general_options: dict[str, Any],
         solvent: Optional[str] = None,
+        solvent_model: Optional[str] = None,
     ) -> None:
         # Reuse the base set-up verbatim: the xTB relaxed scan (constraints, force
         # constants, azide angle handling), the central/nu/lg atom indices and the
@@ -103,7 +106,12 @@ class Psi4TSScan(TSScan):
         # intentionally dropped -- Psi4 always returns the wavefunction and bond
         # orders come from oeprop, so there is no NBO/accuracy flag to honour.
         self.solvent = solvent
-        calc_options = {"solvent": solvent} if solvent else None
+        self.solvent_model = solvent_model
+        calc_options: Optional[dict[str, Any]] = None
+        if solvent:
+            calc_options = {"solvent": solvent}
+            if solvent_model:
+                calc_options["solvent_model"] = solvent_model
         self.dft = make_calculator(atoms, options=calc_options)
         self.g16 = self.dft
         self.dft_options = dft_options
