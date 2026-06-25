@@ -61,9 +61,9 @@ Run inside a QC conda env. Examples::
     # In place over a finished/active run directory (per-substrate subdirs):
     python scripts/extract_gas_cache.py --run data/processed/realpool_dmso
 
-    # From the per-task archive zips (e.g. the runbook --archive-dir / a datadump mirror):
+    # From the per-task archive zips (the runbook's --archive-dir, or a mirror of it):
     python scripts/extract_gas_cache.py \\
-        --archive ../datadump/snar-qc-runs/realpool_dmso \\
+        --archive <ARCHIVE_DIR> \\
         --outdir  data/processed/realpool_dmso_gas
 
 Then sweep a solvent off the reconstructed cache (use the **same engine** the geometries
