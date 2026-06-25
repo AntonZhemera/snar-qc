@@ -123,9 +123,10 @@ Two clear signals:
 
 _Validation slice: `data/external/lu74_poc_slice.csv` (10 substrates spanning the
 published 15.3–22.9 kcal/mol range, 7 Cl + 3 F leaving groups). Computed values and the
-join: `notes/assets/poc_validation_join.csv`; statistics:
-`notes/assets/poc_validation_stats.json`; scatter:
-`notes/assets/poc_validation_scatter.png`._
+join: `notes/assets/cpu_gas/poc_validation_join.csv`; statistics:
+`notes/assets/cpu_gas/poc_validation_stats.json`; scatter:
+`notes/assets/cpu_gas/poc_validation_scatter.png` (regenerated 2026-06-25 from
+`data/processed/poc_run`; see `notes/assets/cpu_gas/README.md`)._
 
 ## Go / no-go
 

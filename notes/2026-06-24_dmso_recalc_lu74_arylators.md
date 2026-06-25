@@ -9,7 +9,7 @@ PCM single points on gas-phase geometries (no PCM Hessian). xTB relaxed scan →
 Experimental ΔG‡ for the lu74 slice are from the published S~N~Ar reactivity dataset —
 Lu, J.; Paci, I.; Leitch, D. C. *Chem. Sci.* **2022**, *13*, 12681–12695 (DOI 10.1039/d2sc04041g).
 **Outputs:** `data/processed/lu74_solv_dmso/`, `data/processed/qc_5ring_arylators_dmso/`
-(per-substrate `result.json` sidecars + audit `.out`). Validation in `notes/assets/`.
+(per-substrate `result.json` sidecars + audit `.out`). Validation in `notes/assets/cpu_dmso/`.
 
 ## Yield
 
@@ -29,7 +29,7 @@ NO₂-pyridine (lu_1/17 ≈ 18.1–18.5) < CN-pyridine (lu_3/22 ≈ 21.3–21.9)
 NO₂-benzene (lu_31/8 ≈ 24.0–24.2) < bare 2-Br-pyridine (lu_11 ≈ 26.4) < EDG Me/alkoxy
 (lu_12/57/14 ≈ 27.9–29.7) < F-leaving fluoropyridines (lu_66/67/69/72 ≈ 29.6–34.3) <
 unactivated F-leaving chlorobenzene (lu_74 ≈ 37.6). Ordering tracks activation strength and
-leaving-group ability. Full per-substrate values in `notes/assets/poc_validation_join.csv`.
+leaving-group ability. Full per-substrate values in `notes/assets/cpu_dmso/poc_validation_join.csv`.
 
 ## Validation vs the empirical descriptor column (`dg_kcal`)
 
