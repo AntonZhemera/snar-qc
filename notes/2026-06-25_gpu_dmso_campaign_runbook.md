@@ -29,43 +29,66 @@ resumable (`--retry` re-runs only incomplete substrates), failure-is-data (per-s
 `status`). The solvated SP adds one extra SCF per species and shifts the scan SPs to the
 continuum — modest cost on top of the gas pipeline.
 
-Expected ~**33–36 min/substrate** (gas TS opt+freq ~24 min still dominates) ⇒ ~**10–11 h**
-for the 18-substrate slice, **per model**.
+## Reuse the gas backbone — run it once, sweep solvents on top
+
+The gas backbone (xTB scan, gas TS/ArX/amine opt+freq) is **solvent-independent**, so a
+different solvent/model only needs the **three** implicit-solvent single points on the
+cached gas geometries. A gas run now persists that cache (`gas_thermo.json` + `*_opt.xyz`
+per substrate), and `scripts/sweep_solvent.py` re-evaluates any solvent/model from it.
+
+Per-substrate cost: a full gas+solvent run is ~**33–36 min** (gas TS opt+freq ~24 min
+dominates); a **sweep** is just 3 SCFs, ~**1–2 min**. ETA for the 18-substrate slice:
+
+| approach | ETA |
+|---|---|
+| two full runs (iefpcm, then smd) | ~**20 h** |
+| **gas once + 2 sweeps** (recommended) | ~**11 h** (one gas pass + ~0.9 h of sweeps) |
+| each *further* model (e.g. water, C-PCM) | ~**0.5 h** |
 
 ## Prerequisites
 
-- Env **`gpuqc`** with a free CUDA device. It carries **xtb** and now **gpu4pyscf with
+- Env **`gpuqc`** with a free CUDA device. It carries **xtb** and **gpu4pyscf with
   solvation** (IEF-PCM via `mf.PCM()`, SMD via `mf.SMD()` against gpu4pyscf's `solvent_db`).
 - Run from the repo root.
 
-## Launch
+## Launch (recommended: gas once, then sweep)
 
 ```bash
 conda activate gpuqc
 export SNAR_QC_BACKEND=gpu4pyscf
 export SNAR_QC_REQUIRE_GPU=1     # error out instead of silently falling back to Psi4
 
-# --- 1. IEF-PCM, 18-substrate slice (direct cpu_dmso engine-parity check) ---
+# --- 1. Gas backbone once (writes the reusable gas_thermo.json + *_opt.xyz cache) ---
 python scripts/run_poc.py \
   --substrates data/external/lu74_solv_slice.csv \
-  --outdir     data/processed/gpu_dmso_iefpcm \
-  --solvent DMSO --solvent-model iefpcm \
+  --outdir     data/processed/gpu_dmso_gas \
   --n-procs 1 --mem 2            # ignored by the GPU backend; harmless
 
-# --- 2. SMD, same slice (new capability; no CPU baseline) ---
-python scripts/run_poc.py \
-  --substrates data/external/lu74_solv_slice.csv \
-  --outdir     data/processed/gpu_dmso_smd \
-  --solvent DMSO --solvent-model smd \
-  --n-procs 1 --mem 2
+# --- 2. Sweep DMSO under both models off that one gas run (~1-2 min/substrate each) ---
+python scripts/sweep_solvent.py --gas-run data/processed/gpu_dmso_gas \
+  --solvent DMSO --solvent-model iefpcm --outdir data/processed/gpu_dmso_iefpcm
+python scripts/sweep_solvent.py --gas-run data/processed/gpu_dmso_gas \
+  --solvent DMSO --solvent-model smd    --outdir data/processed/gpu_dmso_smd
 
-# Resume after an interruption (re-runs only substrates without a terminal sidecar):
-#   add --retry to either command, same --outdir.
+# Resume after an interruption: add --retry to any command, same --outdir.
+```
+
+`gpu_dmso_gas` is itself a valid gas run (it is the `lu74_solv_slice` analogue of
+`gpu_stage_e`), so validate it too if you want the gas baseline on the 18-substrate cohort.
+The existing `gpu_stage_e` run predates geometry persistence and **cannot** be swept —
+sweeping needs the cache, so the gas pass above is required.
+
+**Full-run fallback** (no separate cache step; recomputes the gas backbone per model):
+
+```bash
+python scripts/run_poc.py --substrates data/external/lu74_solv_slice.csv \
+  --outdir data/processed/gpu_dmso_iefpcm --solvent DMSO --solvent-model iefpcm \
+  --n-procs 1 --mem 2
 ```
 
 **Faster first pass:** swap `lu74_solv_slice.csv` → `lu74_poc_slice.csv` (10 substrates, no
-Br) to get an IEF-PCM run in ~5 h that overlaps the gas-phase POC slice; the 18-substrate
-run is the one that compares cleanly to `cpu_dmso`.
+Br) to overlap the gas-phase POC slice; the 18-substrate run is the one that compares
+cleanly to `cpu_dmso`.
 
 **Optional H3 probe (arylators):** the CPU DMSO run's `a2`
 (`O=[N+]([O-])c1ccc(Cl)s1`) died three times on a PCMSolver "S matrix not positive-definite"
