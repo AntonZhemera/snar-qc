@@ -54,9 +54,11 @@ never sinks a batch.
 
 from __future__ import annotations
 
+import json
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import predict_snar.config as predict_snar_config
@@ -229,6 +231,34 @@ def _configure_engine() -> None:
 
 _BOHR_TO_ANGSTROM = 0.52917721067
 
+# Gas-cache artefacts written by ``compute_barrier`` so a different solvent/model can be
+# evaluated later without re-running the gas backbone (see :func:`solvent_sweep`). The
+# SP-on-gas recipe makes the gas geometries + thermochemistry solvent-independent, so a
+# new solvent only needs the three implicit-solvent single points on these cached inputs.
+_GAS_CACHE_FILE = "gas_thermo.json"
+# species key -> persisted gas-optimised geometry file (extended XYZ, carries the charge).
+_GEOMETRY_FILES = {"ts": "ts_opt.xyz", "arx": "arx_opt.xyz", "amine": "amine_opt.xyz"}
+
+
+def _persist_geometry(atoms: Any, path: str) -> None:
+    """Write an optimised geometry to extended XYZ, preserving ``info["charge"]``.
+
+    Extended XYZ round-trips the ASE ``info`` dict in the comment line, so the charge
+    survives for the follow-up solvent single point in :func:`solvent_sweep`.
+    """
+    from ase.io import write  # noqa: PLC0415 -- lazy (ASE only needed when running)
+
+    write(path, atoms, format="extxyz")
+
+
+def _read_geometry(path: str) -> Any:
+    """Read an extended-XYZ geometry back, coercing the charge to an int."""
+    from ase.io import read  # noqa: PLC0415 -- lazy
+
+    atoms = read(path, format="extxyz")
+    atoms.info["charge"] = int(round(float(atoms.info.get("charge", 0))))
+    return atoms
+
 
 def _optimised_atoms(calc: Any) -> Any:
     """ASE ``Atoms`` for the optimised geometry, read back per backend.
@@ -264,8 +294,8 @@ def _optimised_atoms(calc: Any) -> Any:
 
 def _solvated_thermo(
     gas_thermo: Psi4Thermo,
-    calc: Any,
-    file: str,
+    atoms: Any,
+    prefix: str,
     n_procs: int,
     mem: float,
     solvent: Optional[str],
@@ -274,7 +304,7 @@ def _solvated_thermo(
     """Apply an implicit solvent as a single-point correction on gas-phase thermochem.
 
     Gas phase (``solvent`` None): returns ``gas_thermo`` unchanged. With a ``solvent``:
-    runs one implicit-solvent single point at the gas-optimised geometry and shifts every
+    runs one implicit-solvent single point at the gas-optimised ``atoms`` and shifts every
     energy term by ``E(solv) - E(gas)``, keeping the gas-phase Hessian's thermal
     corrections, ZPVE and frequencies. This is the standard gas-geometry +
     implicit-solvent single-point protocol. It deliberately sidesteps a *solvent*
@@ -283,19 +313,16 @@ def _solvated_thermo(
     PCM-SCF displacements). The single point runs on the **active backend** (the GPU
     backend offers IEF-PCM and SMD; ``solvent_model`` selects, defaulting to the
     calculator's IEF-PCM), so a GPU chain stays on the GPU instead of needing Psi4.
+
+    Taking the already-optimised ``atoms`` (not a calculator) lets :func:`solvent_sweep`
+    reuse this exact shift logic against a cached gas geometry + thermochemistry.
     """
     if not solvent:
         return gas_thermo
-    prefix = file.rsplit(".", 1)[0]
-    # The implicit-solvent SP correction at the gas geometry, on whichever backend the
-    # rest of the chain uses (read back via ``_optimised_atoms``, which dispatches on the
-    # calculator's wavefunction vs mean_field handle).
     sp_options: dict[str, Any] = {"solvent": solvent}
     if solvent_model:
         sp_options["solvent_model"] = solvent_model
-    sp = make_calculator(
-        _optimised_atoms(calc), file=f"{prefix}_pcm.in", options=sp_options
-    )
+    sp = make_calculator(atoms, file=f"{prefix}_pcm.in", options=sp_options)
     e_pcm = sp.single_point(n_procs=n_procs, mem=mem)
     shift = e_pcm - gas_thermo.electronic_energy
     return Psi4Thermo(
@@ -308,38 +335,66 @@ def _solvated_thermo(
     )
 
 
-def _species_thermo(
-    atoms: Any,
-    file: str,
-    n_procs: int,
-    mem: float,
-    solvent: Optional[str] = None,
-    solvent_model: Optional[str] = None,
-) -> tuple[Psi4Thermo, int, float, float]:
-    """Optimise + frequency-analyse a reference species and bundle its thermochemistry.
+def _species_gas_thermo(
+    atoms: Any, file: str, n_procs: int, mem: float
+) -> tuple[Psi4Thermo, Any, int]:
+    """Gas-phase opt+freq for a reference species.
 
-    Geometry and Hessian are always gas phase; an implicit ``solvent`` is applied as a
-    single-point correction at the gas geometry (see :func:`_solvated_thermo`).
-
-    Args:
-        atoms: ASE ``Atoms`` for the species (carries ``info["charge"]``).
-        file: output-file base name.
-        n_procs: Threads for the calculation.
-        mem: Memory budget (GB).
-        solvent: Optional continuum solvent name; ``None`` runs the species in gas phase.
-        solvent_model: Optional continuum model for the SP correction (e.g. ``"iefpcm"``
-            / ``"smd"`` on the GPU backend); ``None`` uses the calculator's default.
+    Always gas phase -- the solvent is applied afterwards as a single-point correction
+    by :func:`_solvated_thermo`, so this stays solvent-independent and its geometry +
+    thermochemistry are the reusable gas cache.
 
     Returns:
-        ``(thermo, n_imaginary, electronic_energy_hartree, gibbs_qh_hartree)``.
+        ``(gas_thermo, optimised_atoms, n_imaginary)``.
     """
     calc = make_calculator(atoms, file=file, options=None)
     calc.opt_freq(n_procs=n_procs, mem=mem)
     n_imag = count_imaginary(calc.frequencies)
-    thermo = _solvated_thermo(
-        Psi4Thermo.from_calculator(calc), calc, file, n_procs, mem, solvent, solvent_model
-    )
-    return thermo, n_imag, thermo.electronic_energy, thermo.gibbs_qh
+    return Psi4Thermo.from_calculator(calc), _optimised_atoms(calc), n_imag
+
+
+def _thermo_to_dict(thermo: Psi4Thermo) -> dict[str, float]:
+    """The energy terms needed to re-shift a species into a different solvent."""
+    return {
+        "electronic_energy": thermo.electronic_energy,
+        "gibbs": thermo.gibbs,
+        "gibbs_qh": thermo.gibbs_qh,
+        "enthalpy": thermo.enthalpy,
+        "zpve": thermo.zpve,
+    }
+
+
+def _write_gas_cache(
+    result: "BarrierResult", gas_thermos: dict[str, Psi4Thermo]
+) -> None:
+    """Write ``gas_thermo.json`` (gas thermochemistry + geometry refs) to the CWD.
+
+    Paired with the ``*_opt.xyz`` files :func:`compute_barrier` persists, this is the
+    self-contained gas cache :func:`solvent_sweep` reuses to evaluate any other
+    solvent/model without recomputing the gas backbone.
+    """
+    cache = {
+        "lu_id": result.lu_id,
+        "aryl_halide_smiles": result.aryl_halide_smiles,
+        "amine_smiles": result.amine_smiles,
+        "leaving_group": result.leaving_group,
+        "central_atom": result.central_atom,
+        "nu_atom": result.nu_atom,
+        "lg_atom": result.lg_atom,
+        "coordinate": result.coordinate,
+        "reference": result.reference,
+        "peak_index": result.peak_index,
+        "n_imag_ts": result.n_imag_ts,
+        "n_imag_ts_soft": result.n_imag_ts_soft,
+        "ts_imag_freq_cm": result.ts_imag_freq_cm,
+        "n_imag_arx": result.n_imag_arx,
+        "n_imag_amine": result.n_imag_amine,
+        "species": {
+            key: {"geometry": _GEOMETRY_FILES[key], **_thermo_to_dict(gas_thermos[key])}
+            for key in ("ts", "arx", "amine")
+        },
+    }
+    Path(_GAS_CACHE_FILE).write_text(json.dumps(cache, indent=2))
 
 
 def compute_barrier(
@@ -489,14 +544,12 @@ def compute_barrier(
         result.ts_imag_freq_cm = float(min(imag)) if imag else None
         n_imag_significant = count_significant_imaginary(ts_calc.frequencies)
         result.n_imag_ts_soft = n_imag - n_imag_significant
+
+        ts_gas_thermo = Psi4Thermo.from_calculator(ts_calc)
+        ts_atoms = _optimised_atoms(ts_calc)
+        _persist_geometry(ts_atoms, _GEOMETRY_FILES["ts"])
         ts_thermo = _solvated_thermo(
-            Psi4Thermo.from_calculator(ts_calc),
-            ts_calc,
-            "ts.in",
-            n_procs,
-            mem,
-            solvent,
-            solvent_model,
+            ts_gas_thermo, ts_atoms, "ts", n_procs, mem, solvent, solvent_model
         )
         result.ts_energy_hartree = ts_thermo.electronic_energy
         result.ts_gibbs_qh_hartree = ts_thermo.gibbs_qh
@@ -506,30 +559,39 @@ def compute_barrier(
 
         result.stage = "arx_opt_freq"
         t0 = time.time()
-        arx_atoms = build_molecule(rc.aryl_halide_smiles)
-        arx_thermo, n_imag_arx, arx_e, arx_gqh = _species_thermo(
-            arx_atoms, "arx.in", n_procs, mem, solvent=solvent, solvent_model=solvent_model
+        arx_gas_thermo, arx_atoms, n_imag_arx = _species_gas_thermo(
+            build_molecule(rc.aryl_halide_smiles), "arx.in", n_procs, mem
+        )
+        _persist_geometry(arx_atoms, _GEOMETRY_FILES["arx"])
+        arx_thermo = _solvated_thermo(
+            arx_gas_thermo, arx_atoms, "arx", n_procs, mem, solvent, solvent_model
         )
         result.timing_s["arx_opt_freq"] = time.time() - t0
         result.n_imag_arx = n_imag_arx
-        result.arx_energy_hartree = arx_e
-        result.arx_gibbs_qh_hartree = arx_gqh
+        result.arx_energy_hartree = arx_thermo.electronic_energy
+        result.arx_gibbs_qh_hartree = arx_thermo.gibbs_qh
 
         result.stage = "amine_opt_freq"
         t0 = time.time()
-        amine_atoms = build_molecule(rc.amine_smiles)
-        amine_thermo, n_imag_amine, amine_e, amine_gqh = _species_thermo(
-            amine_atoms,
-            "amine.in",
-            n_procs,
-            mem,
-            solvent=solvent,
-            solvent_model=solvent_model,
+        amine_gas_thermo, amine_atoms, n_imag_amine = _species_gas_thermo(
+            build_molecule(rc.amine_smiles), "amine.in", n_procs, mem
+        )
+        _persist_geometry(amine_atoms, _GEOMETRY_FILES["amine"])
+        amine_thermo = _solvated_thermo(
+            amine_gas_thermo, amine_atoms, "amine", n_procs, mem, solvent, solvent_model
         )
         result.timing_s["amine_opt_freq"] = time.time() - t0
         result.n_imag_amine = n_imag_amine
-        result.amine_energy_hartree = amine_e
-        result.amine_gibbs_qh_hartree = amine_gqh
+        result.amine_energy_hartree = amine_thermo.electronic_energy
+        result.amine_gibbs_qh_hartree = amine_thermo.gibbs_qh
+
+        # Persist the gas cache (gas thermochemistry + the three optimised geometries) so a
+        # different solvent/model can be evaluated later via solvent_sweep without re-running
+        # the gas backbone. Solvent-independent by construction (the SP-on-gas recipe).
+        _write_gas_cache(
+            result,
+            {"ts": ts_gas_thermo, "arx": arx_gas_thermo, "amine": amine_gas_thermo},
+        )
 
         # --- 5. ΔG‡ = G(TS) - [G(ArX) + G(amine)] -----------------------------
         result.stage = "barrier"
@@ -553,3 +615,106 @@ def compute_barrier(
         result.status = "error"
         result.error = f"{type(exc).__name__}: {exc}"
         return result
+
+
+def solvent_sweep(
+    gas_dir: "str | Path",
+    solvent: str,
+    solvent_model: Optional[str] = None,
+    n_procs: int = 8,
+    mem: float = 12.0,
+) -> BarrierResult:
+    """Recompute ΔG‡ in a continuum solvent by reusing a cached gas run.
+
+    The SP-on-gas recipe makes the gas backbone (scan, gas TS/ArX/amine opt+freq)
+    solvent-independent, so a different solvent or model costs only the **three**
+    implicit-solvent single points on the cached gas geometries -- minutes, not the
+    ~30+ that a full gas+solvent run takes. Reads the ``gas_thermo.json`` cache and the
+    ``*_opt.xyz`` geometries that :func:`compute_barrier` wrote into ``gas_dir``, runs one
+    solvent SP per species (shifting its thermochemistry by ``E(solv) - E(gas)`` exactly
+    as the full pipeline does), and recombines into a :class:`BarrierResult` with
+    ``solvent`` / ``solvent_model`` set.
+
+    Must be called with the CWD set to the (per-substrate) output directory: the SP
+    outputs are written to the CWD, while the cached inputs are read from ``gas_dir``.
+    """
+    gas_dir = Path(gas_dir)
+    cache_path = gas_dir / _GAS_CACHE_FILE
+    if not cache_path.exists():
+        raise FileNotFoundError(
+            f"No gas cache at {cache_path}; this gas run predates geometry persistence. "
+            f"Re-run the gas backbone to produce {_GAS_CACHE_FILE} + *_opt.xyz."
+        )
+    cache = json.loads(cache_path.read_text())
+
+    result = BarrierResult(
+        aryl_halide_smiles=cache["aryl_halide_smiles"],
+        amine_smiles=cache["amine_smiles"],
+        leaving_group=cache["leaving_group"],
+        central_atom=cache["central_atom"],
+        nu_atom=cache["nu_atom"],
+        lg_atom=cache["lg_atom"],
+        lu_id=cache.get("lu_id"),
+        solvent=solvent,
+        solvent_model=solvent_model,
+        coordinate=cache.get("coordinate", "concerted"),
+    )
+    result.reference = cache.get("reference", "separated_reactants")
+    result.peak_index = cache.get("peak_index")
+    result.n_imag_ts = cache.get("n_imag_ts")
+    result.n_imag_ts_soft = cache.get("n_imag_ts_soft")
+    result.ts_imag_freq_cm = cache.get("ts_imag_freq_cm")
+    result.n_imag_arx = cache.get("n_imag_arx")
+    result.n_imag_amine = cache.get("n_imag_amine")
+
+    try:
+        thermos: dict[str, Psi4Thermo] = {}
+        for key in ("ts", "arx", "amine"):
+            spec = cache["species"][key]
+            geom = gas_dir / spec["geometry"]
+            if not geom.exists():
+                raise FileNotFoundError(f"missing cached geometry {geom}")
+            t0 = time.time()
+            gas_thermo = Psi4Thermo(
+                electronic_energy=spec["electronic_energy"],
+                gibbs=spec["gibbs"],
+                gibbs_qh=spec["gibbs_qh"],
+                enthalpy=spec["enthalpy"],
+                zpve=spec["zpve"],
+                frequencies=[],
+            )
+            thermos[key] = _solvated_thermo(
+                gas_thermo, _read_geometry(str(geom)), key, n_procs, mem,
+                solvent, solvent_model,
+            )
+            result.timing_s[f"{key}_solvent_sp"] = time.time() - t0
+
+        ts_t, arx_t, amine_t = thermos["ts"], thermos["arx"], thermos["amine"]
+        result.ts_energy_hartree = ts_t.electronic_energy
+        result.ts_gibbs_qh_hartree = ts_t.gibbs_qh
+        result.arx_energy_hartree = arx_t.electronic_energy
+        result.arx_gibbs_qh_hartree = arx_t.gibbs_qh
+        result.amine_energy_hartree = amine_t.electronic_energy
+        result.amine_gibbs_qh_hartree = amine_t.gibbs_qh
+        result.delta_g_qh_kcal = activation_free_energy(
+            ts_t, arx_t, amine_t, which="gibbs_qh"
+        )
+        result.delta_g_kcal = activation_free_energy(
+            ts_t, arx_t, amine_t, which="gibbs"
+        )
+        result.delta_h_kcal = activation_free_energy(
+            ts_t, arx_t, amine_t, which="enthalpy"
+        )
+        result.delta_e_kcal = activation_free_energy(
+            ts_t, arx_t, amine_t, which="electronic_energy"
+        )
+        # The saddle was validated in the gas run; carry that verdict (significant
+        # imaginary modes = n_imag_ts - soft), since the geometry is unchanged.
+        n_sig = (result.n_imag_ts or 0) - (result.n_imag_ts_soft or 0)
+        result.status = "completed" if n_sig == 1 else "ts_not_saddle"
+        result.stage = "solvent_sweep"
+    except Exception as exc:  # noqa: BLE001 -- failure is recorded, not raised
+        result.status = "error"
+        result.error = f"{type(exc).__name__}: {exc}"
+
+    return result

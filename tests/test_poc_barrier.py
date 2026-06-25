@@ -6,7 +6,10 @@ counting, rate-determining-peak selection, and the result's JSON round-trip.
 """
 
 import json
+import os
 from collections import namedtuple
+
+import pytest
 
 import snar_qc.poc.barrier as barrier
 from snar_qc.poc.barrier import BarrierResult, count_imaginary, select_peak_index
@@ -223,3 +226,134 @@ def test_barrier_result_json_round_trip():
     assert restored["delta_g_qh_kcal"] == 21.3
     assert restored["n_imag_ts"] == 1
     assert restored["scan_dft_energies_kcal"] == []
+
+
+# -- gas cache + solvent sweep (geometry-persistence reuse path) ------------------
+
+
+def test_geometry_persist_round_trip(tmp_path):
+    """_persist_geometry -> _read_geometry preserves symbols, positions, and charge."""
+    from ase import Atoms
+
+    atoms = Atoms("HF", positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.92)])
+    atoms.info["charge"] = -1
+    path = tmp_path / "sp.xyz"
+    barrier._persist_geometry(atoms, str(path))
+    back = barrier._read_geometry(str(path))
+
+    assert list(back.get_chemical_symbols()) == ["H", "F"]
+    assert back.info["charge"] == -1
+    assert back.get_positions()[1][2] == pytest.approx(0.92)
+
+
+def _thermo(e, gqh):
+    """A Psi4Thermo with electronic + gibbs_qh set (others tracked alongside)."""
+    from snar_qc.qc.thermo import Psi4Thermo
+
+    return Psi4Thermo(
+        electronic_energy=e, gibbs=gqh, gibbs_qh=gqh, enthalpy=gqh, zpve=0.0, frequencies=[]
+    )
+
+
+def _write_gas_cache_fixture(tmp_path):
+    """Build a minimal gas cache (gas_thermo.json + 3 geometries) in tmp_path."""
+    from ase import Atoms
+
+    # Distinct atom counts so the fake SP can return a per-species energy.
+    geoms = {
+        "ts": Atoms("H3", positions=[(0, 0, 0), (0, 0, 0.7), (0, 0.7, 0)]),
+        "arx": Atoms("H2", positions=[(0, 0, 0), (0, 0, 0.7)]),
+        "amine": Atoms("H", positions=[(0, 0, 0)]),
+    }
+    for a in geoms.values():
+        a.info["charge"] = 0
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        for key, a in geoms.items():
+            barrier._persist_geometry(a, barrier._GEOMETRY_FILES[key])
+        result = BarrierResult(
+            aryl_halide_smiles="Fc1ccccc1",
+            amine_smiles="CN",
+            leaving_group="F",
+            central_atom=1,
+            nu_atom=8,
+            lg_atom=2,
+            lu_id=7,
+            n_imag_ts=1,
+            n_imag_ts_soft=0,
+        )
+        gas_thermos = {
+            "ts": _thermo(-100.5, -100.4),
+            "arx": _thermo(-10.3, -10.25),
+            "amine": _thermo(-1.2, -1.15),
+        }
+        barrier._write_gas_cache(result, gas_thermos)
+    finally:
+        os.chdir(cwd)
+
+
+def test_write_gas_cache_structure(tmp_path):
+    """_write_gas_cache emits a self-contained cache with per-species thermo + geometry."""
+    _write_gas_cache_fixture(tmp_path)
+    cache = json.loads((tmp_path / barrier._GAS_CACHE_FILE).read_text())
+
+    assert cache["lu_id"] == 7
+    assert cache["n_imag_ts"] == 1
+    assert set(cache["species"]) == {"ts", "arx", "amine"}
+    assert cache["species"]["ts"]["geometry"] == "ts_opt.xyz"
+    assert cache["species"]["ts"]["electronic_energy"] == -100.5
+    assert cache["species"]["amine"]["gibbs_qh"] == -1.15
+
+
+def test_solvent_sweep_reuses_gas_cache(tmp_path, monkeypatch):
+    """solvent_sweep recombines ΔG‡ from the cache + 3 solvent SPs, no gas recompute."""
+    from predict_snar.data import HARTREE_TO_KCAL
+
+    _write_gas_cache_fixture(tmp_path)
+
+    # Fake SP: return a per-species solvated electronic energy keyed by atom count.
+    solv_e = {3: -100.0, 2: -10.0, 1: -1.0}
+    calls = {"n": 0}
+
+    class _FakeSPCalc:
+        def __init__(self, atoms):
+            self.atoms = atoms
+
+        def single_point(self, n_procs=1, mem=1.0):
+            calls["n"] += 1
+            return solv_e[len(self.atoms)]
+
+    monkeypatch.setattr(
+        barrier, "make_calculator", lambda atoms, file=None, options=None: _FakeSPCalc(atoms)
+    )
+
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    cwd = os.getcwd()
+    os.chdir(outdir)
+    try:
+        result = barrier.solvent_sweep(tmp_path, "DMSO", "iefpcm")
+    finally:
+        os.chdir(cwd)
+
+    assert calls["n"] == 3  # exactly one SP per species -- the gas backbone is reused
+    assert result.status == "completed"
+    assert result.solvent == "DMSO"
+    assert result.solvent_model == "iefpcm"
+    assert result.lu_id == 7
+
+    # shift_sp = E_solv - E_gas; G_qh_solv = G_qh_gas + shift.
+    gqh = {  # G_qh_gas + (E_solv - E_gas)
+        "ts": -100.4 + (-100.0 - -100.5),
+        "arx": -10.25 + (-10.0 - -10.3),
+        "amine": -1.15 + (-1.0 - -1.2),
+    }
+    expected = (gqh["ts"] - gqh["arx"] - gqh["amine"]) * HARTREE_TO_KCAL
+    assert result.delta_g_qh_kcal == pytest.approx(expected)
+
+
+def test_solvent_sweep_without_cache_raises(tmp_path):
+    """A gas run predating geometry persistence (no cache) fails with a clear message."""
+    with pytest.raises(FileNotFoundError, match="gas cache"):
+        barrier.solvent_sweep(tmp_path, "DMSO", "iefpcm")
