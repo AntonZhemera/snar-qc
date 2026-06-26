@@ -58,6 +58,9 @@ xtbopt.*
 xtbrestart.*
 autode_calculations/
 *_autode/
+# ...but the fixed-amine reference cache is a committed asset, not scratch -- keep its
+# geometry sidecars (the *.xyz rule above would otherwise drop them).
+!assets/amine_ref/*.xyz
 # PCMSolver scratch (written to CWD by the PCM single point)
 PEDRA.OUT*
 cavity.off*

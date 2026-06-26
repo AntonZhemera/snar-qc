@@ -1,0 +1,19 @@
+{
+  "amine_smiles": "CN",
+  "backend": "gpu4pyscf",
+  "level": "b3lyp-d3bj_def2-svp",
+  "n_imag": 0,
+  "geometry": "CN__b3lyp-d3bj_def2-svp__gpu4pyscf.xyz",
+  "electronic_energy": -95.78927686745502,
+  "gibbs": -95.74856679075782,
+  "gibbs_qh": -95.74856854987051,
+  "enthalpy": -95.72131774693501,
+  "zpve": 0.06361173187651878,
+  "_provenance": {
+    "seeded_by": "scripts/extract_amine_ref.py",
+    "source_run": "/home/anton/dev/snar-qc/data/processed/gpu_dmso_gas",
+    "source_substrate": "lu_1",
+    "n_substrates_checked": 18,
+    "note": "copied from a finished gas run (no recomputation)"
+  }
+}

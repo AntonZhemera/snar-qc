@@ -129,9 +129,26 @@ Outputs Pearson/Spearman/MAE + a **per-leaving-group** breakdown and a scatter. 
 - **Spurious TS** (a saddle below reactants, ΔG‡ implausibly low): gate on `n_imag_ts == 1`
   *and* a sane ΔE; cross-check engines if a single substrate is a parity outlier.
 
-## 8. Efficiency note — fixed-amine reference
+## 8. Fixed-amine reference cache
 
-The methylamine reference is currently re-optimised + re-freq'd for **every** substrate
-(`barrier.py`, stage `amine_opt_freq`; ~12 s each vs ~21 min for the TS), even though it is
-invariant. Not a bottleneck, but redundant. A future `assets/amine_ref/` cache keyed by amine
-SMILES + level of theory could supply the reference once; tracked as low-priority polish.
+The model amine is invariant, so its gas reference is **cached** in `assets/amine_ref/`
+keyed by `(amine, level-of-theory, backend)` (`snar_qc.poc.amine_cache`). `compute_barrier`
+reuses it via `cached_amine_reference` and skips the redundant ~12 s opt+freq on every
+substrate after the first; a genuine miss (new amine or new backend) computes it once and
+stores it. The key is backend-specific on purpose — Psi4 and gpu4pyscf absolute energies
+differ, so the two never mix.
+
+You do **not** need to compute the seed: every finished gas run already contains the amine
+reference, so copy it (no recompute), exactly like `extract_gas_cache.py`:
+
+```bash
+# Seed the gpu4pyscf reference from a finished GPU gas run (checks all substrates agree):
+python scripts/extract_amine_ref.py --run data/processed/<run>_gas --backend gpu4pyscf
+# Seed the Psi4 reference from a CPU gas run:
+python scripts/extract_amine_ref.py --run data/processed/<cpu_run> --backend psi4
+```
+
+Override the location with `$SNAR_QC_AMINE_CACHE`; delete the asset to force a fresh
+recompute on the next run. Because the amine enters every barrier identically, a cached
+reference shifts all ΔG‡ by the same constant — ranking (the headline) is invariant even if
+library versions drift slightly.

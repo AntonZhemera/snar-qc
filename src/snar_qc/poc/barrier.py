@@ -63,7 +63,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import predict_snar.config as predict_snar_config
 
-from snar_qc.qc.backend import make_calculator
+from snar_qc.qc.backend import GPU4PYSCF, PSI4, make_calculator
 from snar_qc.qc.thermo import Psi4Thermo, activation_free_energy
 from snar_qc.ts.psi4_tsscan import Psi4TSScan
 
@@ -353,6 +353,40 @@ def _species_gas_thermo(
     return Psi4Thermo.from_calculator(calc), _optimised_atoms(calc), n_imag
 
 
+def cached_amine_reference(
+    amine_smiles: str, n_procs: int, mem: float
+) -> tuple[Psi4Thermo, Any, int]:
+    """Gas opt+freq for the fixed model amine, reusing a cached reference when present.
+
+    The model amine is invariant across substrates and runs, so its gas reference is cached
+    on disk keyed by ``(amine, level-of-theory, backend)`` (see
+    :mod:`snar_qc.poc.amine_cache`). A cache hit returns the stored ``(thermo, atoms,
+    n_imag)`` and skips the opt+freq entirely (~12 s/substrate of pure redundancy); a miss
+    computes it via :func:`_species_gas_thermo` and stores it for the next substrate/run.
+
+    Backend and level are read off a freshly constructed (not-yet-run) calculator, so the
+    key reflects the engine that *actually* runs: a GPU request that fell back to Psi4 is
+    keyed -- and stored -- as Psi4, never crossing backends (whose absolute energies differ).
+    """
+    from snar_qc.poc import amine_cache
+    from snar_qc.poc.complex import build_molecule
+
+    atoms = build_molecule(amine_smiles)
+    # Construct (no QC run) to read the resolved level and the concrete backend class.
+    probe = make_calculator(atoms, file="amine.in", options=None)
+    backend = GPU4PYSCF if type(probe).__name__.startswith("GPU") else PSI4
+    level = amine_cache.level_tag(probe.options)
+
+    hit = amine_cache.load(amine_smiles, backend, level)
+    if hit is not None:
+        thermo, cached_atoms, n_imag = hit
+        return thermo, cached_atoms, int(n_imag or 0)
+
+    gas_thermo, opt_atoms, n_imag = _species_gas_thermo(atoms, "amine.in", n_procs, mem)
+    amine_cache.store(amine_smiles, backend, level, gas_thermo, opt_atoms, n_imag)
+    return gas_thermo, opt_atoms, n_imag
+
+
 def _thermo_to_dict(thermo: Psi4Thermo) -> dict[str, float]:
     """The energy terms needed to re-shift a species into a different solvent."""
     return {
@@ -573,8 +607,10 @@ def compute_barrier(
 
         result.stage = "amine_opt_freq"
         t0 = time.time()
-        amine_gas_thermo, amine_atoms, n_imag_amine = _species_gas_thermo(
-            build_molecule(rc.amine_smiles), "amine.in", n_procs, mem
+        # Fixed model amine: reuse the cached gas reference when present, else compute it
+        # once and cache it (skips a redundant ~12 s opt+freq on every later substrate/run).
+        amine_gas_thermo, amine_atoms, n_imag_amine = cached_amine_reference(
+            rc.amine_smiles, n_procs, mem
         )
         _persist_geometry(amine_atoms, _GEOMETRY_FILES["amine"])
         amine_thermo = _solvated_thermo(
