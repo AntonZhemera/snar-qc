@@ -1,0 +1,26 @@
+{
+  "gas": {
+    "n_completed": 18,
+    "spearman_r": 0.6099,
+    "pearson_r": 0.4295,
+    "mae_kcal": 14.548,
+    "mean_offset_kcal": 14.548,
+    "mae_offset_corrected_kcal": 5.386
+  },
+  "iefpcm": {
+    "n_completed": 18,
+    "spearman_r": 0.7688,
+    "pearson_r": 0.7743,
+    "mae_kcal": 7.156,
+    "mean_offset_kcal": 7.156,
+    "mae_offset_corrected_kcal": 2.798
+  },
+  "smd": {
+    "n_completed": 17,
+    "spearman_r": 0.8995,
+    "pearson_r": 0.857,
+    "mae_kcal": 5.764,
+    "mean_offset_kcal": 5.764,
+    "mae_offset_corrected_kcal": 2.326
+  }
+}

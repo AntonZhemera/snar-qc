@@ -44,11 +44,19 @@ present identically on both engines — not a GPU artefact.
 These assets span two axes. Pool results **only within a cell**, or across cells where
 equivalence has been demonstrated.
 
-| | gas phase | DMSO (PCM-SP) |
-|---|---|---|
-| **Psi4 (CPU)** | `../cpu_gas/` | `../cpu_dmso/` |
-| **gpu4pyscf (GPU)** | `gpu_stage_e/` (here) | *not possible yet — PCM is Psi4-only* |
+| | gas phase | DMSO IEF-PCM (SP) | DMSO SMD (SP) |
+|---|---|---|---|
+| **Psi4 (CPU)** | `../cpu_gas/` | `../cpu_dmso/` | *not possible — Psi4 1.10.2 has no SMD* |
+| **gpu4pyscf (GPU)** | `gpu_stage_e/` (here), `../gpu_gas/` (18) | `../gpu_dmso_iefpcm/` ✓ | `../gpu_dmso_smd/` ✓ |
 
-Only **`cpu_gas` ↔ `gpu_stage_e`** equivalence is established (< 0.2 kcal/mol, above).
-`cpu_dmso` differs by real solvation physics **and** a larger cohort (18, incl. Br) — do
-not diff gas results against it.
+Established equivalences:
+- **`cpu_gas` ↔ `gpu_stage_e`** — gas engine parity, < 0.2 kcal/mol (above).
+- **`cpu_dmso` ↔ `gpu_dmso_iefpcm`** — IEF-PCM engine comparison (2026-06-26): Br/Cl within
+  ~0.5–0.8 kcal/mol, F diverges 1–3 (PCM cavity model); GPU also fixed CPU's `lu_27`/`lu_65`
+  failures. Comparable engine-to-engine, same level of theory & cohort.
+
+`gpu4pyscf` PCM uses no PCMSolver, so it adds the **SMD** cell the Psi4 path cannot
+(`gpu_dmso_smd/`). Within the GPU/DMSO row, `gpu_gas` ↔ `gpu_dmso_iefpcm` ↔ `gpu_dmso_smd`
+are model-comparable (same engine & 18-substrate cohort, solvation swapped). Do **not** diff
+gas absolute ΔG‡ against any DMSO folder — different solvation physics. Full comparison:
+`notes/2026-06-26_gpu_dmso_solvent_model_comparison.md`.
