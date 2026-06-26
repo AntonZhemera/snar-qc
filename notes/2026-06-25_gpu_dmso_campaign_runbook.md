@@ -1,5 +1,10 @@
 # Runbook — GPU DMSO revalidation campaign (IEF-PCM + SMD), run manually
 
+> **Superseded as the standing procedure** by the living SOP
+> [`docs/sop_snar_deltag.md`](../docs/sop_snar_deltag.md) (2026-06-26). This file is kept as
+> the historical record of the one-off DMSO revalidation campaign; outcome:
+> `notes/2026-06-26_gpu_dmso_solvent_model_comparison.md`.
+
 Brings the **gpu4pyscf backend** up to the DMSO frontier that the CPU/Psi4 path reached in
 `notes/2026-06-24_dmso_recalc_lu74_arylators.md` (assets: `notes/assets/cpu_dmso/`). GPU
 implicit solvation is now implemented (IEF-PCM **and** SMD; the SP-on-gas recipe that
