@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 from snar_qc.poc.barrier import compute_barrier
 from snar_qc.poc.complex import DEFAULT_AMINE_SMILES, build_reaction_complex
+from snar_qc.qc.backend import free_gpu_memory
 
 # A sidecar with one of these statuses counts as "done" -- not re-run unless --force.
 TERMINAL_STATUSES = {"completed", "no_peak", "ts_not_saddle", "error"}
@@ -135,6 +136,9 @@ def run_substrate(
         )
     finally:
         os.chdir(cwd)
+        # Return CuPy's pooled VRAM to the driver so a long batch in one process does
+        # not accumulate memory and OOM later/larger substrates (no-op off the GPU path).
+        free_gpu_memory()
 
     payload = result.to_dict()
     payload["wall_s"] = round(time.time() - started, 1)

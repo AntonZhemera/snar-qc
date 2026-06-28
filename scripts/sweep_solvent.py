@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from snar_qc.poc.barrier import _GAS_CACHE_FILE, solvent_sweep  # noqa: E402
 from snar_qc.poc.worker import should_skip  # noqa: E402
+from snar_qc.qc.backend import free_gpu_memory  # noqa: E402
 
 
 def _gas_substrate_dirs(gas_run: Path, only: Optional[set[str]]) -> list[Path]:
@@ -111,6 +112,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             payload = {"tag": tag, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
         finally:
             os.chdir(cwd)
+            # Free CuPy's pooled VRAM between substrates (no-op off the GPU path) so a
+            # long sweep in one process does not OOM the later/larger members.
+            free_gpu_memory()
 
         payload["tag"] = tag
         payload["wall_s"] = round(time.time() - started, 1)

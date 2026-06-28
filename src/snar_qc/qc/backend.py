@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING, Any, Optional
 
 from predict_snar.calculators import Calculator
@@ -102,6 +103,31 @@ def probe_gpu(min_free_vram_bytes: int = _MIN_FREE_VRAM_BYTES) -> None:
             f"insufficient free VRAM: {free_bytes / 1024**3:.2f} GB free < "
             f"{min_free_vram_bytes / 1024**3:.2f} GB required"
         )
+
+
+def free_gpu_memory() -> None:
+    """Release CuPy's memory pools back to the driver — call once per substrate in batches.
+
+    The gpu4pyscf backend runs in-process, and CuPy caches freed device memory in a pool
+    that is **not** returned to the driver between substrates. A long batch in one process
+    therefore accumulates VRAM and OOMs the later / larger members on a small card
+    (`cudaErrorMemoryAllocation`) even though each substrate individually fits — the cause
+    of the full-Lu_74 SMD 60→69 artefact (notes/2026-06-28_lu74_full_deltag_analysis.md).
+    Freeing the default and pinned pools after each substrate keeps peak usage flat.
+
+    Acts **only when ``cupy`` is already imported** (i.e. the GPU backend was actually
+    used): it never imports cupy itself, so the Psi4 / CPU path — and CPU-only hosts where
+    cupy is absent — are untouched. Cleanup failures are swallowed: a memory-release hiccup
+    must never abort a batch.
+    """
+    cupy = sys.modules.get("cupy")
+    if cupy is None:
+        return
+    try:
+        cupy.get_default_memory_pool().free_all_blocks()
+        cupy.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception as exc:  # noqa: BLE001 -- never break a batch on a cleanup hiccup
+        logger.debug("free_gpu_memory: CuPy pool free failed: %s", exc)
 
 
 def make_calculator(

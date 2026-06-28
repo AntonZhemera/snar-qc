@@ -195,3 +195,46 @@ def test_probe_raises_when_driver_query_fails(monkeypatch):
     monkeypatch.setitem(sys.modules, "cupy", cupy)
     with pytest.raises(GPUUnavailableError, match="driver query failed"):
         probe_gpu()
+
+
+# -- free_gpu_memory: per-substrate CuPy pool release ----------------------------
+
+
+def _fake_cupy_with_pools(calls):
+    """A stand-in ``cupy`` whose two pools record their ``free_all_blocks()`` calls."""
+    cupy = types.ModuleType("cupy")
+
+    def _pool(name):
+        return types.SimpleNamespace(free_all_blocks=lambda: calls.append(name))
+
+    cupy.get_default_memory_pool = lambda: _pool("device")
+    cupy.get_default_pinned_memory_pool = lambda: _pool("pinned")
+    return cupy
+
+
+def test_free_gpu_memory_noop_without_cupy(monkeypatch):
+    """Off the GPU path (cupy never imported) it is a silent no-op, importing nothing."""
+    monkeypatch.delitem(sys.modules, "cupy", raising=False)
+    backend_mod.free_gpu_memory()  # must not raise
+    assert "cupy" not in sys.modules  # and must not have imported cupy
+
+
+def test_free_gpu_memory_frees_both_pools(monkeypatch):
+    """When cupy is already imported, both the device and pinned pools are released."""
+    calls: list[str] = []
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy_with_pools(calls))
+    backend_mod.free_gpu_memory()
+    assert calls == ["device", "pinned"]
+
+
+def test_free_gpu_memory_swallows_errors(monkeypatch):
+    """A cleanup hiccup must never abort the batch."""
+    cupy = types.ModuleType("cupy")
+
+    def _boom():
+        raise RuntimeError("pool boom")
+
+    cupy.get_default_memory_pool = _boom
+    cupy.get_default_pinned_memory_pool = _boom
+    monkeypatch.setitem(sys.modules, "cupy", cupy)
+    backend_mod.free_gpu_memory()  # must not raise
