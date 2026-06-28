@@ -61,11 +61,11 @@ Established by the 2026-06-26 comparison (`notes/2026-06-26_gpu_dmso_solvent_mod
 | axis | **Default** | Fallback |
 |:--|:--|:--|
 | Engine | **GPU / gpu4pyscf** (env `gpuqc`) — gas parity with Psi4 (<0.2 kcal/mol), more robust solvated, ~10× cheaper via gas+sweep | **CPU / Psi4** (env `snar-qc`) on hosts with no CUDA device — the portable path |
-| Solvent model | **SMD** — best ranking (ρ≈0.90), lowest MAE, narrowest leaving-group spread | **IEF-PCM** per substrate where SMD's SCF fails to converge; SMD is GPU-only |
-| Calibration | report **ranking** + a **per-leaving-group** offset | — never a single global offset (F is a distinct, over-penalised cluster) |
+| Solvent model | **SMD** — best ranking (ρ≈0.82 full Lu_74, lowest MAE, narrowest leaving-group spread) | **IEF-PCM** where SMD is unavailable (CPU/Psi4 host) — SMD is GPU-only. SMD does **not** SCF-fail on these substrates; its only gap is the heavier VRAM footprint on a small card (mitigated by the per-substrate pool free). |
+| Calibration | report **ranking** + a **per-leaving-group** offset (shared slope, per-LG intercept; see `scripts/fit_united_model.py`) | — never a single global offset (F is a distinct, over-penalised cluster) |
 
 Both solvent models cost ~1–2 min/substrate off one gas backbone, so the recommended
-production recipe computes **both** and prefers SMD where it converges.
+production recipe computes **both** and prefers SMD.
 
 ## 4. Procedure (recommended: gas once, then sweep)
 
@@ -104,7 +104,11 @@ python scripts/run_poc.py --substrates data/external/<your_input>.csv \
 
 - Per substrate: `data/processed/<run>/<tag>/result.json` (ΔG‡(qh), n_imag, solvent +
   solvent_model provenance, per-stage timing). `summary.json` rolls up the batch.
-- Health: `nvidia-smi` (~1 GB, one job at a time; a clean GPU run never nears the 4 GB ceiling).
+- Health: `nvidia-smi` (~1 GB per substrate, one job at a time). A *single* POC-sized job
+  stays well under the 4 GB ceiling, but a long **batch in one process** accumulates VRAM
+  because CuPy does not return its pool between substrates — the runner now frees the pool
+  per substrate (`backend.free_gpu_memory`), so batches stay flat. Genuinely large arylators
+  (CF₃-quinolines, bis-CF₃ arenes) can still exceed 4 GB at the analytic Hessian even solo.
 - Resumable & failure-is-data: `--retry` re-runs only incomplete substrates; a failed
   substrate is recorded with `status: error`, never aborts the batch.
 
@@ -118,12 +122,21 @@ python scripts/validate_poc.py --slice data/external/<your_input>.csv \
 Outputs Pearson/Spearman/MAE + a **per-leaving-group** breakdown and a scatter. Drop a
 `README.md` in each new asset dir (what / when / method / stack / comparability).
 
-## 7. Known failure modes (none retry-fixable; characterised)
+## 7. Known failure modes (characterised)
 
+- **GPU cumulative OOM** (`cudaErrorMemoryAllocation`): the dominant failure on the 4 GB card,
+  and **retry-fixable** — it is *not* SCF non-convergence. A batch in one process accumulates
+  CuPy's pool, so later/larger substrates OOM even when individually small (e.g. SMD on
+  `Clc1cc(N2CCCC2)ncn1` OOM'd in the full-Lu_74 batch, then completed fine on retry). The
+  runner now frees the pool per substrate; to recover sidecars left by an older batch, re-run
+  with `--retry` (each substrate gets a fresh allocation). See
+  `notes/2026-06-28_lu74_full_deltag_analysis.md`.
+- **Genuinely memory- *and* convergence-limited substrates** (large arylators: CF₃-quinolines,
+  bis-CF₃ arenes, fused dimethoxy-quinolines): the gas analytic Hessian can exceed 4 GB, and
+  the TS optimisation can need many cycles. Use a larger GPU (more VRAM, looser TS budget) or
+  the CPU/Psi4 path (no VRAM limit; IEF-PCM only, no SMD).
 - **Nitrile-bearing TS** (e.g. `N#Cc1ccnc(Cl)c1`): CPU optking can fail to converge (linear-bend
   oscillation); the GPU geomeTRIC path clears it. Prefer GPU for nitrile substrates.
-- **SMD SCF non-convergence** on some electron-rich arylators (e.g. `Clc1cc(N2CCCC2)ncn1`):
-  fall back to IEF-PCM for that substrate.
 - **PCM cavity death** (Psi4/PCMSolver "S matrix not positive-definite"): a CPU-only failure;
   gpu4pyscf's PCM uses no PCMSolver and does not hit it.
 - **Spurious TS** (a saddle below reactants, ΔG‡ implausibly low): gate on `n_imag_ts == 1`
