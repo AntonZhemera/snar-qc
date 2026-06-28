@@ -1,0 +1,59 @@
+{
+  "metric_column": "delta_g_qh_kcal",
+  "n": 69,
+  "leaving_groups": [
+    "F",
+    "Cl",
+    "Br"
+  ],
+  "united_shared_slope": {
+    "slope": 1.5341,
+    "intercept_by_lg": {
+      "F": -1.3733,
+      "Cl": -4.5967,
+      "Br": -5.1058
+    },
+    "mean_offset_by_lg": {
+      "F": 9.012,
+      "Cl": 5.567,
+      "Br": 5.065
+    },
+    "r_squared": 0.746,
+    "adj_r_squared": 0.7342,
+    "n_params": 4
+  },
+  "calibrated_prediction": {
+    "spearman_r": 0.8494,
+    "pearson_r": 0.8436,
+    "mae_kcal": 0.942,
+    "rmse_kcal": 1.268,
+    "max_abs_err_kcal": 4.666
+  },
+  "per_lg_slope_model": {
+    "slope_by_lg": {
+      "F": 1.3834,
+      "Cl": 1.5576,
+      "Br": 1.498
+    },
+    "intercept_by_lg": {
+      "F": 1.5578,
+      "Cl": -5.043,
+      "Br": -4.4187
+    },
+    "r_squared": 0.7465,
+    "adj_r_squared": 0.7264,
+    "n_params": 6
+  },
+  "slope_choice_f_test": {
+    "f_stat": 0.0699,
+    "p_value": 0.9326,
+    "df": [
+      2,
+      63
+    ],
+    "verdict": "shared slope sufficient (per-LG slopes not justified, p>=0.05)"
+  },
+  "source_model_counts": {
+    "smd": 69
+  }
+}
