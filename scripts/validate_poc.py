@@ -36,6 +36,8 @@ import pandas as pd  # noqa: E402
 from scipy.stats import pearsonr, spearmanr  # noqa: E402
 
 KJ_PER_KCAL = 4.184
+# Leaving-group colours, shared by every scatter -- the LG-dependent offset is the headline.
+PALETTE = {"Cl": "#2c7fb8", "F": "#d95f0e", "Br": "#31a354"}
 
 
 def load_computed(run_dir: Path) -> pd.DataFrame:
@@ -128,10 +130,24 @@ def compute_stats(join: pd.DataFrame, column: str = "delta_g_qh_kcal") -> dict:
         ge = sub["exp_dg_kcal"].to_numpy()
         gc = sub[column].to_numpy()
         goff = float(np.mean(gc - ge))
+        # Per-LG calibration regression, computed-on-experimental
+        # (comp = slope * exp + intercept). The slope answers the diagnostic
+        # "does this leaving group respond more/less steeply than the others?";
+        # an ideal calibration has slope ~1 and intercept ~mean_offset. R^2 is
+        # direction-invariant (== pearson_r ** 2). The per-LG *correction* applied
+        # downstream remains the mean offset (mean_offset_kcal).
+        slope, intercept = (float(x) for x in np.polyfit(ge, gc, 1))
+        pred = slope * ge + intercept
+        ss_res = float(np.sum((gc - pred) ** 2))
+        ss_tot = float(np.sum((gc - gc.mean()) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
         by_group[str(group)] = {
             "n": int(len(sub)),
             "spearman_r": round(float(spearmanr(gc, ge).statistic), 4),
             "pearson_r": round(float(pearsonr(gc, ge)[0]), 4),
+            "ols_slope": round(slope, 4),
+            "ols_intercept": round(intercept, 4),
+            "r_squared": round(r2, 4),
             "mean_offset_kcal": round(goff, 3),
             "mae_offset_corrected_kcal": round(
                 float(np.mean(np.abs((gc - goff) - ge))), 3
@@ -148,12 +164,11 @@ def make_scatter(join: pd.DataFrame, stats: dict, out_png: Path, column: str) ->
     exp = ok["exp_dg_kcal"].to_numpy()
     comp = ok[column].to_numpy()
     # Colour by leaving group -- the leaving-group-dependent offset is the headline.
-    palette = {"Cl": "#2c7fb8", "F": "#d95f0e", "Br": "#31a354"}
     for group, sub in ok.groupby("leaving_group"):
         ax.scatter(
             sub["exp_dg_kcal"],
             sub[column],
-            c=palette.get(str(group), "#666666"),
+            c=PALETTE.get(str(group), "#666666"),
             s=60,
             zorder=3,
             label=f"{group} (n={len(sub)})",
@@ -197,6 +212,59 @@ def make_scatter(join: pd.DataFrame, stats: dict, out_png: Path, column: str) ->
     plt.close(fig)
 
 
+def make_per_lg_plot(
+    join: pd.DataFrame, stats: dict, out_png: Path, column: str
+) -> None:
+    """One calibration panel per leaving group: points + that LG's own fit.
+
+    Each panel shows computed vs experimental ΔG‡ for a single leaving group, the
+    per-LG OLS trend (``comp = slope*exp + intercept``, matching ``ols_slope`` /
+    ``ols_intercept`` in the stats) and a parity line shifted by that LG's mean
+    offset (the individual correction). Visualises Step 2: each leaving group is
+    calibrated by its own offset, and the slope shows whether one family responds
+    more steeply than the others.
+    """
+    by_lg = stats.get("by_leaving_group", {})
+    groups = [g for g in ("F", "Cl", "Br") if g in by_lg and "ols_slope" in by_lg[g]]
+    if not groups:
+        return
+    ok = join[(join["status"] == "completed") & join[column].notna()]
+    fig, axes = plt.subplots(
+        1, len(groups), figsize=(4.4 * len(groups), 4.4), squeeze=False
+    )
+    for ax, group in zip(axes[0], groups):
+        sub = ok[ok["leaving_group"] == group]
+        gm = by_lg[group]
+        exp = sub["exp_dg_kcal"].to_numpy()
+        comp = sub[column].to_numpy()
+        ax.scatter(exp, comp, c=PALETTE.get(group, "#666666"), s=55, zorder=3)
+        xs = np.array([exp.min() - 0.5, exp.max() + 0.5])
+        ax.plot(
+            xs,
+            gm["ols_slope"] * xs + gm["ols_intercept"],
+            "-",
+            c="black",
+            lw=1.3,
+            label=f"fit: slope={gm['ols_slope']}",
+        )
+        off = gm["mean_offset_kcal"]
+        ax.plot(xs, xs + off, "--", c="grey", lw=1, label=f"parity+offset ({off:+.1f})")
+        ax.set_title(
+            f"{group} (n={gm['n']})  R²={gm.get('r_squared')}\n"
+            f"ρ={gm['spearman_r']}  oc-MAE={gm['mae_offset_corrected_kcal']}",
+            fontsize=9,
+        )
+        ax.set_xlabel("Experimental ΔG‡ (kcal/mol)")
+        ax.set_ylabel(f"Computed {column} (kcal/mol)")
+        ax.legend(fontsize=7, loc="upper left")
+    fig.suptitle(
+        "Per-leaving-group calibration (each LG by its own offset)", fontsize=10
+    )
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slice", required=True, help="Lu_74 slice CSV (experimental)")
@@ -219,14 +287,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     stats_out = out / "poc_validation_stats.json"
     stats_out.write_text(json.dumps(stats, indent=2))
     scatter_out = out / "poc_validation_scatter.png"
+    per_lg_out = out / "poc_validation_per_lg.png"
     if stats.get("n_completed", 0) >= 2:
         make_scatter(join, stats, scatter_out, column=args.column)
+        make_per_lg_plot(join, stats, per_lg_out, column=args.column)
 
     print(json.dumps(stats, indent=2))
     print(f"\nJoin:    {join_out}")
     print(f"Stats:   {stats_out}")
     if stats.get("n_completed", 0) >= 2:
         print(f"Scatter: {scatter_out}")
+        if stats.get("by_leaving_group"):
+            print(f"Per-LG:  {per_lg_out}")
     return 0
 
 
