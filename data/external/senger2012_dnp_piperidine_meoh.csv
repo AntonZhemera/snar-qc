@@ -1,0 +1,6 @@
+substrate_id,smiles_canonical,leaving_group,name,nucleophile,solvent,exp_dG_kcal,exp_dH_kcal,exp_dS_cal_molK,exp_k_M1s1_20C,exp_rel_rate_20C,source
+dnp_F,O=[N+]([O-])c1ccc(F)c([N+](=O)[O-])c1,F,"1-fluoro-2,4-dinitrobenzene",piperidine,methanol,16.6,5.3,-37.7,3.5,1613,Senger2012_JOC_10.1021/jo301134q
+tnb_NO2,O=[N+]([O-])c1ccc([N+](=O)[O-])c([N+](=O)[O-])c1,NO2,"1,2,4-trinitrobenzene",piperidine,methanol,17.3,5.9,-38.4,1.0,461,Senger2012_JOC_10.1021/jo301134q
+dnp_Cl,O=[N+]([O-])c1ccc(Cl)c([N+](=O)[O-])c1,Cl,"1-chloro-2,4-dinitrobenzene",piperidine,methanol,20.0,8.6,-38.4,0.0077,4,Senger2012_JOC_10.1021/jo301134q
+dnp_Br,O=[N+]([O-])c1ccc(Br)c([N+](=O)[O-])c1,Br,"1-bromo-2,4-dinitrobenzene",piperidine,methanol,20.0,8.9,-37.3,0.00928,4,Senger2012_JOC_10.1021/jo301134q
+dnp_I,O=[N+]([O-])c1ccc(I)c([N+](=O)[O-])c1,I,"1-iodo-2,4-dinitrobenzene",piperidine,methanol,20.9,9.7,-37.6,0.00217,1,Senger2012_JOC_10.1021/jo301134q
