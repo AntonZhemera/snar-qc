@@ -72,6 +72,70 @@ def test_charge_is_neutral_and_geometry_finite():
     assert np.all(np.isfinite(rc.atoms.get_positions()))
 
 
+def _count_neighbours(atoms, centre_one_indexed, symbol, cutoff):
+    """Number of atoms of ``symbol`` within ``cutoff`` Angstrom of a 1-indexed atom."""
+    centre = atoms.get_positions()[centre_one_indexed - 1]
+    symbols = atoms.get_chemical_symbols()
+    positions = atoms.get_positions()
+    count = 0
+    for i, sym in enumerate(symbols):
+        if i == centre_one_indexed - 1 or sym != symbol:
+            continue
+        if float(np.linalg.norm(positions[i] - centre)) <= cutoff:
+            count += 1
+    return count
+
+
+# 2-chloro-4-nitropyridine: the ipso-S~N~Ar probe substrate. C2 bears Cl (Path A), C4
+# bears NO2 (Path B); the two pathways must resolve to *different* ipso carbons.
+_NITROPYRIDINE = "Clc1nccc([N+](=O)[O-])c1"
+
+
+def test_nitro_leaving_group_selects_nitrogen_and_ipso_carbon():
+    """leaving_group='NO2' picks the nitro N as LG and its aromatic carbon as ipso."""
+    rc = build_reaction_complex(_NITROPYRIDINE, leaving_group="NO2")
+
+    symbols = rc.atoms.get_chemical_symbols()
+    # The leaving atom is the nitro nitrogen; the ipso is an aromatic carbon; Nu is N.
+    assert symbols[rc.lg_atom - 1] == "N"
+    assert symbols[rc.central_atom - 1] == "C"
+    assert symbols[rc.nu_atom - 1] == "N"
+    assert rc.leaving_group == "NO2"
+
+    # The leaving nitrogen is bonded to the ipso carbon (within a C-N bond length) ...
+    assert _distance(rc.atoms, rc.central_atom, rc.lg_atom) < 1.6
+    # ... and carries the two nitro oxygens (so it really is a nitro nitrogen).
+    assert _count_neighbours(rc.atoms, rc.lg_atom, "O", cutoff=1.4) == 2
+    assert rc.atoms.info["charge"] == 0
+
+
+def test_nitro_token_is_case_insensitive():
+    """'nitro' selects the same nitro-displacement site as 'NO2'."""
+    rc_no2 = build_reaction_complex(_NITROPYRIDINE, leaving_group="NO2")
+    rc_nitro = build_reaction_complex(_NITROPYRIDINE, leaving_group="nitro")
+    assert rc_nitro.central_atom == rc_no2.central_atom
+    assert rc_nitro.lg_atom == rc_no2.lg_atom
+    assert rc_nitro.leaving_group == "NO2"
+
+
+def test_nitro_and_halide_paths_pick_different_ipso_carbons():
+    """On 2-Cl-4-NO2-pyridine, Path A (Cl) and Path B (NO2) target distinct carbons."""
+    rc_cl = build_reaction_complex(_NITROPYRIDINE, leaving_group="Cl")
+    rc_no2 = build_reaction_complex(_NITROPYRIDINE, leaving_group="NO2")
+
+    # Path A leaves chlorine; Path B leaves the nitro nitrogen.
+    assert rc_cl.atoms.get_chemical_symbols()[rc_cl.lg_atom - 1] == "Cl"
+    assert rc_no2.atoms.get_chemical_symbols()[rc_no2.lg_atom - 1] == "N"
+    # The two pathways attack different ring carbons (C2 vs C4) -- the crux of the probe.
+    assert rc_cl.central_atom != rc_no2.central_atom
+
+
+def test_nitro_leaving_group_requires_a_nitro_group():
+    """Requesting NO2 on a substrate with no aromatic nitro raises a clear error."""
+    with pytest.raises(ValueError, match="nitro"):
+        build_reaction_complex("Clc1ccncc1", leaving_group="NO2")
+
+
 def test_build_molecule_reference_species():
     """build_molecule embeds a bare species with explicit Hs and the formal charge."""
     # Methylamine: C, N, and 5 H once hydrogens are added -> 7 atoms, neutral.
