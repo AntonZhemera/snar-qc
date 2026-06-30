@@ -71,6 +71,7 @@ def _config(args: argparse.Namespace) -> WorkerConfig:
         coordinate=args.coordinate,
         retry=args.retry,
         force=args.force,
+        resume=args.resume,
     )
 
 
@@ -120,6 +121,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--force", action="store_true", help="re-run all substrates from scratch"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="within a substrate, skip stages already checkpointed in its progress.json "
+        "(scan, TS opt+freq, ArX opt+freq) after an interrupted run; --force overrides",
     )
     args = parser.parse_args(argv)
 

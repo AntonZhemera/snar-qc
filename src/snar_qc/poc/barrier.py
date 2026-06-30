@@ -431,6 +431,63 @@ def _write_gas_cache(
     Path(_GAS_CACHE_FILE).write_text(json.dumps(cache, indent=2))
 
 
+# Per-substrate stage checkpoint written into the substrate workdir as each expensive stage
+# completes, so ``--resume`` can skip a finished stage after an arbitrary termination (thermal
+# cutoff, OOM, killed session) instead of redoing the whole gas backbone (see compute_barrier).
+_PROGRESS_FILE = "progress.json"
+
+
+def _thermo_from_dict(d: dict[str, float]) -> Psi4Thermo:
+    """Rebuild a gas ``Psi4Thermo`` from a persisted stage checkpoint.
+
+    Only the five energy terms are stored (and reloaded); ``frequencies`` is left empty
+    because nothing downstream of the saddle/imaginary-mode counts -- already captured on the
+    result -- consumes the vibrational list (the solvent shift in :func:`_solvated_thermo`
+    carries it through but never reads it numerically).
+    """
+    return Psi4Thermo(
+        electronic_energy=d["electronic_energy"],
+        gibbs=d["gibbs"],
+        gibbs_qh=d["gibbs_qh"],
+        enthalpy=d["enthalpy"],
+        zpve=d["zpve"],
+        frequencies=[],
+    )
+
+
+def _load_progress(resume: bool, key: dict) -> dict:
+    """Read the per-substrate stage checkpoint from the CWD, or ``{}`` when unusable.
+
+    Returns the persisted ``stages`` mapping only when ``resume`` is set, the file parses, and
+    its ``key`` matches ``key`` (same molecule + reaction coordinate). A mismatch -- a stale
+    checkpoint left in a reused workdir -- is treated as no progress so it can never feed the
+    wrong run. Any read/parse error degrades to ``{}`` (recompute), never raises.
+    """
+    if not resume:
+        return {}
+    path = Path(_PROGRESS_FILE)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if data.get("key") != key:
+        return {}
+    return data.get("stages", {})
+
+
+def _save_stage(stages: dict, key: dict, name: str, payload: dict) -> dict:
+    """Persist one freshly completed stage to ``progress.json``; return updated ``stages``.
+
+    The file is rewritten whole (key + all stages so far) on every stage so a crash mid-write
+    leaves either the previous valid checkpoint or the new one, never a torn partial.
+    """
+    stages = {**stages, name: payload}
+    Path(_PROGRESS_FILE).write_text(json.dumps({"key": key, "stages": stages}, indent=2))
+    return stages
+
+
 def compute_barrier(
     rc: "ReactionComplex",
     *,
@@ -444,6 +501,7 @@ def compute_barrier(
     solvent: Optional[str] = None,
     solvent_model: Optional[str] = None,
     coordinate: str = "concerted",
+    resume: bool = False,
 ) -> BarrierResult:
     """Compute ΔG‡ for one reaction complex, returning a status-carrying result.
 
@@ -477,6 +535,13 @@ def compute_barrier(
             gas-phase saddle but can acquire one once solvent stabilises the developing
             Meisenheimer charge. The choice is recorded on the result; this never
             silently switches paths.
+        resume: When ``True``, skip any stage already recorded in this workdir's
+            ``progress.json`` (scan+SPs, TS opt+freq, ArX opt+freq), loading its persisted
+            geometry + gas thermochemistry instead of recomputing. Lets a run pick up after
+            an arbitrary mid-substrate termination instead of redoing the gas backbone. The
+            checkpoint is pinned to ``(smiles, coordinate)``; a mismatch recomputes. The
+            cheap solvent single-point corrections always re-run. Default ``False`` keeps the
+            deterministic from-scratch behaviour.
 
     Returns:
         A :class:`BarrierResult`; ``status == "completed"`` only for a confirmed saddle.
@@ -500,6 +565,10 @@ def compute_barrier(
         )
         return result
 
+    # Stage checkpoints persisted by an earlier (interrupted) run of this same substrate.
+    progress_key = {"smiles": rc.aryl_halide_smiles, "coordinate": coordinate}
+    stages = _load_progress(resume, progress_key)
+
     try:
         _configure_engine()
         general_options = {
@@ -508,80 +577,127 @@ def compute_barrier(
             "lg_atom": rc.lg_atom,
         }
 
-        # --- 1. relaxed scan along the chosen reaction coordinate --------------
-        result.stage = "scan"
-        t0 = time.time()
-        scan = Psi4TSScan(
-            rc.atoms, {}, {}, general_options, solvent=solvent, solvent_model=solvent_model
-        )
-        start_nu = float(rc.atoms.get_distance(rc.central_atom - 1, rc.nu_atom - 1))
-        # The forming C...Nu bond is always scanned inwards.
-        scan.constrain_bond(rc.central_atom, rc.nu_atom, "auto")
-        scan.add_scan(
-            rc.central_atom, rc.nu_atom, "auto", start_nu, scan_stop, scan_steps
-        )
-        if coordinate == "concerted":
-            # Second constraint + scan; xTB advances both bonds together, tracing the
-            # antisymmetric d(C-Nu) - d(C-LG) coordinate (Nu in while LG out).
-            start_lg = float(rc.atoms.get_distance(rc.central_atom - 1, rc.lg_atom - 1))
-            scan.constrain_bond(rc.central_atom, rc.lg_atom, "auto")
-            scan.add_scan(
-                rc.central_atom, rc.lg_atom, "auto", start_lg, scan_stop_lg, scan_steps
+        # --- 1-2. relaxed scan + DFT single points -> validated TS guess -------
+        # Resumable: a finished scan persists its chosen TS-guess geometry (ts_guess.xyz) and
+        # the scan energetics, so a resumed run skips the xTB scan + DFT single points.
+        if "scan" in stages and Path("ts_guess.xyz").exists():
+            cached = stages["scan"]
+            result.peak_index = cached["peak_index"]
+            result.n_scan_points = cached["n_scan_points"]
+            result.scan_dft_energies_kcal = cached["scan_dft_energies_kcal"]
+            result.scan_xtb_energies_kcal = cached["scan_xtb_energies_kcal"]
+            ts_guess = _read_geometry("ts_guess.xyz")
+        else:
+            result.stage = "scan"
+            t0 = time.time()
+            scan = Psi4TSScan(
+                rc.atoms, {}, {}, general_options, solvent=solvent, solvent_model=solvent_model
             )
-        # else "addition": only the forming bond is driven; C-LG stays intact and
-        # relaxes. No gas-phase saddle, but a solvated one is possible (see docstring).
-        scan.run_scan(n_procs=2).wait()
-        scan.read_scan_output()
-        result.timing_s["scan_xtb"] = time.time() - t0
+            start_nu = float(rc.atoms.get_distance(rc.central_atom - 1, rc.nu_atom - 1))
+            # The forming C...Nu bond is always scanned inwards.
+            scan.constrain_bond(rc.central_atom, rc.nu_atom, "auto")
+            scan.add_scan(
+                rc.central_atom, rc.nu_atom, "auto", start_nu, scan_stop, scan_steps
+            )
+            if coordinate == "concerted":
+                # Second constraint + scan; xTB advances both bonds together, tracing the
+                # antisymmetric d(C-Nu) - d(C-LG) coordinate (Nu in while LG out).
+                start_lg = float(rc.atoms.get_distance(rc.central_atom - 1, rc.lg_atom - 1))
+                scan.constrain_bond(rc.central_atom, rc.lg_atom, "auto")
+                scan.add_scan(
+                    rc.central_atom, rc.lg_atom, "auto", start_lg, scan_stop_lg, scan_steps
+                )
+            # else "addition": only the forming bond is driven; C-LG stays intact and
+            # relaxes. No gas-phase saddle, but a solvated one is possible (see docstring).
+            scan.run_scan(n_procs=2).wait()
+            scan.read_scan_output()
+            result.timing_s["scan_xtb"] = time.time() - t0
 
-        # --- 2. DFT single points + peak location ------------------------------
-        result.stage = "dft_sps"
-        t0 = time.time()
-        scan.run_sps(n_procs=n_procs, mem=mem)
-        scan.read_sp_output()
-        scan.find_peaks()
-        scan.validate_peaks(intermediate=True, threshold=0.5)
-        if make_plot:
-            try:
-                scan.make_plot()
-            except Exception:  # plotting is cosmetic; never fail a run on it
-                pass
-        result.timing_s["dft_sps"] = time.time() - t0
-        result.n_scan_points = len(scan.geometries)
-        result.scan_dft_energies_kcal = [float(e) for e in scan.dft_energies]
-        result.scan_xtb_energies_kcal = [float(e) for e in scan.xtb_energies]
+            result.stage = "dft_sps"
+            t0 = time.time()
+            scan.run_sps(n_procs=n_procs, mem=mem)
+            scan.read_sp_output()
+            scan.find_peaks()
+            scan.validate_peaks(intermediate=True, threshold=0.5)
+            if make_plot:
+                try:
+                    scan.make_plot()
+                except Exception:  # plotting is cosmetic; never fail a run on it
+                    pass
+            result.timing_s["dft_sps"] = time.time() - t0
+            result.n_scan_points = len(scan.geometries)
+            result.scan_dft_energies_kcal = [float(e) for e in scan.dft_energies]
+            result.scan_xtb_energies_kcal = [float(e) for e in scan.xtb_energies]
 
-        peak_index = select_peak_index(scan)
-        result.peak_index = peak_index
-        if peak_index is None:
-            result.status = "no_peak"
-            return result
+            peak_index = select_peak_index(scan)
+            result.peak_index = peak_index
+            if peak_index is None:
+                result.status = "no_peak"
+                return result
+
+            ts_guess = scan.geometries[peak_index].copy()
+            ts_guess.info["charge"] = rc.atoms.info["charge"]
+            _persist_geometry(ts_guess, "ts_guess.xyz")
+            stages = _save_stage(
+                stages,
+                progress_key,
+                "scan",
+                {
+                    "peak_index": peak_index,
+                    "n_scan_points": result.n_scan_points,
+                    "scan_dft_energies_kcal": result.scan_dft_energies_kcal,
+                    "scan_xtb_energies_kcal": result.scan_xtb_energies_kcal,
+                },
+            )
 
         # --- 3. TS optimisation + frequencies on the peak geometry -------------
         result.stage = "ts_opt_freq"
-        t0 = time.time()
-        ts_guess = scan.geometries[peak_index].copy()
         ts_guess.info["charge"] = rc.atoms.info["charge"]
-        # TS opt+freq always in gas phase; the solvent enters as an implicit-solvent
-        # single-point correction at the gas saddle (matches the cpu_dmso recipe; see
-        # _solvated_thermo).
-        ts_calc = make_calculator(ts_guess, file="ts.in", options=None)
-        ts_calc.ts_freq(n_procs=n_procs, mem=mem)
-        result.timing_s["ts_opt_freq"] = time.time() - t0
+        # Resumable: a finished TS opt+freq persists ts_opt.xyz + its gas thermochemistry and
+        # imaginary-mode counts, so a resumed run reloads the saddle instead of re-optimising.
+        if "ts" in stages and Path(_GEOMETRY_FILES["ts"]).exists():
+            cached = stages["ts"]
+            ts_atoms = _read_geometry(_GEOMETRY_FILES["ts"])
+            ts_gas_thermo = _thermo_from_dict(cached)
+            result.n_imag_ts = cached["n_imag"]
+            result.n_imag_ts_soft = cached["n_imag_soft"]
+            result.ts_imag_freq_cm = cached["ts_imag_freq_cm"]
+            n_imag_significant = cached["n_imag_significant"]
+        else:
+            t0 = time.time()
+            # TS opt+freq always in gas phase; the solvent enters as an implicit-solvent
+            # single-point correction at the gas saddle (matches the cpu_dmso recipe; see
+            # _solvated_thermo).
+            ts_calc = make_calculator(ts_guess, file="ts.in", options=None)
+            ts_calc.ts_freq(n_procs=n_procs, mem=mem)
+            result.timing_s["ts_opt_freq"] = time.time() - t0
 
-        # Saddle order and imaginary mode come from the gas-phase Hessian. Split the
-        # imaginary modes into *significant* (|nu| >= cutoff: a genuine reaction mode)
-        # and *soft* (below it: a near-free rotor tolerated and folded into the thermo).
-        n_imag = count_imaginary(ts_calc.frequencies)
-        result.n_imag_ts = n_imag
-        imag = [nu for nu in (ts_calc.frequencies or []) if nu < 0.0]
-        result.ts_imag_freq_cm = float(min(imag)) if imag else None
-        n_imag_significant = count_significant_imaginary(ts_calc.frequencies)
-        result.n_imag_ts_soft = n_imag - n_imag_significant
+            # Saddle order and imaginary mode come from the gas-phase Hessian. Split the
+            # imaginary modes into *significant* (|nu| >= cutoff: a genuine reaction mode)
+            # and *soft* (below it: a near-free rotor tolerated and folded into the thermo).
+            n_imag = count_imaginary(ts_calc.frequencies)
+            result.n_imag_ts = n_imag
+            imag = [nu for nu in (ts_calc.frequencies or []) if nu < 0.0]
+            result.ts_imag_freq_cm = float(min(imag)) if imag else None
+            n_imag_significant = count_significant_imaginary(ts_calc.frequencies)
+            result.n_imag_ts_soft = n_imag - n_imag_significant
 
-        ts_gas_thermo = Psi4Thermo.from_calculator(ts_calc)
-        ts_atoms = _optimised_atoms(ts_calc)
-        _persist_geometry(ts_atoms, _GEOMETRY_FILES["ts"])
+            ts_gas_thermo = Psi4Thermo.from_calculator(ts_calc)
+            ts_atoms = _optimised_atoms(ts_calc)
+            _persist_geometry(ts_atoms, _GEOMETRY_FILES["ts"])
+            stages = _save_stage(
+                stages,
+                progress_key,
+                "ts",
+                {
+                    **_thermo_to_dict(ts_gas_thermo),
+                    "n_imag": result.n_imag_ts,
+                    "n_imag_soft": result.n_imag_ts_soft,
+                    "ts_imag_freq_cm": result.ts_imag_freq_cm,
+                    "n_imag_significant": n_imag_significant,
+                },
+            )
+
         ts_thermo = _solvated_thermo(
             ts_gas_thermo, ts_atoms, "ts", n_procs, mem, solvent, solvent_model
         )
@@ -591,16 +707,29 @@ def compute_barrier(
         # --- 4. separated-reactants reference: bare ArX + bare amine -----------
         from snar_qc.poc.complex import build_molecule
 
+        # Resumable: a finished ArX opt+freq persists arx_opt.xyz + its gas thermochemistry.
         result.stage = "arx_opt_freq"
-        t0 = time.time()
-        arx_gas_thermo, arx_atoms, n_imag_arx = _species_gas_thermo(
-            build_molecule(rc.aryl_halide_smiles), "arx.in", n_procs, mem
-        )
-        _persist_geometry(arx_atoms, _GEOMETRY_FILES["arx"])
+        if "arx" in stages and Path(_GEOMETRY_FILES["arx"]).exists():
+            cached = stages["arx"]
+            arx_atoms = _read_geometry(_GEOMETRY_FILES["arx"])
+            arx_gas_thermo = _thermo_from_dict(cached)
+            n_imag_arx = cached["n_imag"]
+        else:
+            t0 = time.time()
+            arx_gas_thermo, arx_atoms, n_imag_arx = _species_gas_thermo(
+                build_molecule(rc.aryl_halide_smiles), "arx.in", n_procs, mem
+            )
+            _persist_geometry(arx_atoms, _GEOMETRY_FILES["arx"])
+            result.timing_s["arx_opt_freq"] = time.time() - t0
+            stages = _save_stage(
+                stages,
+                progress_key,
+                "arx",
+                {**_thermo_to_dict(arx_gas_thermo), "n_imag": n_imag_arx},
+            )
         arx_thermo = _solvated_thermo(
             arx_gas_thermo, arx_atoms, "arx", n_procs, mem, solvent, solvent_model
         )
-        result.timing_s["arx_opt_freq"] = time.time() - t0
         result.n_imag_arx = n_imag_arx
         result.arx_energy_hartree = arx_thermo.electronic_energy
         result.arx_gibbs_qh_hartree = arx_thermo.gibbs_qh

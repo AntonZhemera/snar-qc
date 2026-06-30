@@ -357,3 +357,105 @@ def test_solvent_sweep_without_cache_raises(tmp_path):
     """A gas run predating geometry persistence (no cache) fails with a clear message."""
     with pytest.raises(FileNotFoundError, match="gas cache"):
         barrier.solvent_sweep(tmp_path, "DMSO", "iefpcm")
+
+
+# --- --resume stage checkpointing ------------------------------------------------------
+
+def test_thermo_dict_round_trip():
+    """_thermo_from_dict rebuilds the five energy terms _thermo_to_dict persisted."""
+    from snar_qc.qc.thermo import Psi4Thermo
+
+    thermo = Psi4Thermo(
+        electronic_energy=-100.5, gibbs=-100.4, gibbs_qh=-100.3,
+        enthalpy=-100.45, zpve=0.12, frequencies=[1.0, 2.0],
+    )
+    rebuilt = barrier._thermo_from_dict(barrier._thermo_to_dict(thermo))
+    assert rebuilt.electronic_energy == -100.5
+    assert rebuilt.gibbs_qh == -100.3
+    assert rebuilt.enthalpy == -100.45
+    assert rebuilt.zpve == 0.12
+
+
+def test_load_progress_semantics(tmp_path, monkeypatch):
+    """_load_progress returns stages only for resume + present + matching key; else {}."""
+    monkeypatch.chdir(tmp_path)
+    key = {"smiles": "Fc1ccccc1", "coordinate": "concerted"}
+
+    assert barrier._load_progress(False, key) == {}  # resume off
+    assert barrier._load_progress(True, key) == {}  # no file
+
+    stages = barrier._save_stage({}, key, "scan", {"peak_index": 3})
+    assert stages == {"scan": {"peak_index": 3}}
+    assert barrier._load_progress(True, key) == {"scan": {"peak_index": 3}}
+
+    # A checkpoint for a different molecule / coordinate is ignored (stale workdir reuse).
+    assert barrier._load_progress(True, {"smiles": "X", "coordinate": "concerted"}) == {}
+    assert barrier._load_progress(True, {"smiles": "Fc1ccccc1", "coordinate": "addition"}) == {}
+
+    (tmp_path / "progress.json").write_text("not json")
+    assert barrier._load_progress(True, key) == {}  # unreadable -> recompute
+
+
+def test_save_stage_accumulates(tmp_path, monkeypatch):
+    """_save_stage appends to the existing stages without dropping earlier ones."""
+    monkeypatch.chdir(tmp_path)
+    key = {"smiles": "Fc1ccccc1", "coordinate": "concerted"}
+    s = barrier._save_stage({}, key, "scan", {"peak_index": 1})
+    s = barrier._save_stage(s, key, "ts", {"n_imag": 1})
+    assert set(s) == {"scan", "ts"}
+    assert barrier._load_progress(True, key) == s
+
+
+def test_compute_barrier_resume_skips_finished_stages(tmp_path, monkeypatch):
+    """A fully-checkpointed substrate recombines ΔG‡ from disk with zero QC engine calls."""
+    from ase import Atoms
+    from snar_qc.qc.thermo import Psi4Thermo
+
+    # Persist the geometries the resume path reads back (real extxyz round-trip).
+    for fn in ("ts_guess.xyz", "ts_opt.xyz", "arx_opt.xyz"):
+        barrier._persist_geometry(
+            Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]], info={"charge": 0}),
+            str(tmp_path / fn),
+        )
+    key = {"smiles": _FakeRC.aryl_halide_smiles, "coordinate": "concerted"}
+    stages = {
+        "scan": {
+            "peak_index": 5, "n_scan_points": 14,
+            "scan_dft_energies_kcal": [0.0] * 14, "scan_xtb_energies_kcal": [0.0] * 14,
+        },
+        "ts": {
+            "electronic_energy": -100.0, "gibbs": -99.0, "gibbs_qh": -99.0,
+            "enthalpy": -99.5, "zpve": 0.1, "n_imag": 1, "n_imag_soft": 0,
+            "ts_imag_freq_cm": -500.0, "n_imag_significant": 1,
+        },
+        "arx": {
+            "electronic_energy": -90.0, "gibbs": -89.0, "gibbs_qh": -89.0,
+            "enthalpy": -89.5, "zpve": 0.1, "n_imag": 0,
+        },
+    }
+    (tmp_path / "progress.json").write_text(json.dumps({"key": key, "stages": stages}))
+
+    amine_thermo = Psi4Thermo(
+        electronic_energy=-10.0, gibbs=-9.0, gibbs_qh=-9.0,
+        enthalpy=-9.5, zpve=0.05, frequencies=[],
+    )
+    monkeypatch.setattr(
+        barrier, "cached_amine_reference", lambda *a, **k: (amine_thermo, Atoms("N"), 0)
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("QC engine must not run on a fully-resumed substrate")
+
+    monkeypatch.setattr(barrier, "Psi4TSScan", _boom)
+    monkeypatch.setattr(barrier, "make_calculator", _boom)
+    monkeypatch.chdir(tmp_path)
+
+    result = barrier.compute_barrier(_FakeRC(), resume=True)
+
+    assert result.status == "completed"  # n_imag_significant == 1 carried from checkpoint
+    assert result.peak_index == 5
+    assert result.n_imag_ts == 1 and result.n_imag_arx == 0
+    assert result.ts_imag_freq_cm == -500.0
+    assert "ts_opt_freq" not in result.timing_s  # the expensive stage was skipped
+    assert result.delta_g_qh_kcal is not None
+    assert (tmp_path / "gas_thermo.json").exists()  # gas cache still emitted for solvent_sweep

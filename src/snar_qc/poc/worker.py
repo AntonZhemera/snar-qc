@@ -41,6 +41,7 @@ class WorkerConfig:
     coordinate: str = "concerted"
     retry: bool = False
     force: bool = False
+    resume: bool = False
 
 
 def slug(text: str) -> str:
@@ -133,6 +134,8 @@ def run_substrate(
             solvent=cfg.solvent,
             solvent_model=cfg.solvent_model,
             coordinate=cfg.coordinate,
+            # --force always recomputes from scratch; otherwise honour --resume.
+            resume=cfg.resume and not cfg.force,
         )
     finally:
         os.chdir(cwd)
