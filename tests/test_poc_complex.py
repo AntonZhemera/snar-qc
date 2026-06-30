@@ -8,7 +8,13 @@ normal, and keeps the engine's 1-indexed atom contract self-consistent.
 import numpy as np
 import pytest
 
-from snar_qc.poc.complex import build_molecule, build_reaction_complex
+from rdkit import Chem
+
+from snar_qc.poc.complex import (
+    _activation_score,
+    build_molecule,
+    build_reaction_complex,
+)
 
 
 def _distance(atoms, i_one_indexed, j_one_indexed):
@@ -128,6 +134,60 @@ def test_nitro_and_halide_paths_pick_different_ipso_carbons():
     assert rc_no2.atoms.get_chemical_symbols()[rc_no2.lg_atom - 1] == "N"
     # The two pathways attack different ring carbons (C2 vs C4) -- the crux of the probe.
     assert rc_cl.central_atom != rc_no2.central_atom
+
+
+# 1,2,4-trinitrobenzene: the Senger 2012 nitro-leaving-group anchor. All three nitro
+# carbons score equally under a position-blind activator count, but only C1 is ortho
+# *and* para to the other two nitros -- the kinetically favoured ipso for nitrite loss.
+_TNB = "O=[N+]([O-])c1ccc([N+](=O)[O-])c([N+](=O)[O-])c1"
+
+
+def _doubly_activated_nitro_carbon(smiles):
+    """Heavy-atom index of the ring carbon with the most ortho/para nitro activators."""
+    mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    ring = max(mol.GetRingInfo().AtomRings(), key=len)
+
+    def bears_nitro(idx):
+        atom = mol.GetAtomWithIdx(idx)
+        return any(
+            nbr.GetIdx() not in ring
+            and nbr.GetSymbol() == "N"
+            and any(b.GetSymbol() == "O" for b in nbr.GetNeighbors())
+            for nbr in atom.GetNeighbors()
+        )
+
+    nitro_carbons = [i for i in ring if bears_nitro(i)]
+    return max(nitro_carbons, key=lambda i: _activation_score(mol, i))
+
+
+def test_activation_score_is_ortho_para_aware_on_tnb():
+    """On TNB the C1 nitro (ortho+para to the other two) outscores the C2/C4 nitros."""
+    mol = Chem.AddHs(Chem.MolFromSmiles(_TNB))
+    ring = max(mol.GetRingInfo().AtomRings(), key=len)
+
+    def bears_nitro(idx):
+        atom = mol.GetAtomWithIdx(idx)
+        return any(
+            nbr.GetIdx() not in ring
+            and nbr.GetSymbol() == "N"
+            and any(b.GetSymbol() == "O" for b in nbr.GetNeighbors())
+            for nbr in atom.GetNeighbors()
+        )
+
+    scores = sorted(_activation_score(mol, i) for i in ring if bears_nitro(i))
+    # Two singly-activated carbons (C2, C4) and one doubly-activated (C1).
+    assert scores == [1, 1, 2]
+
+
+def test_nitro_leaving_group_picks_doubly_activated_carbon_on_tnb():
+    """build_reaction_complex(TNB, NO2) targets the doubly-activated C1, not a tie-break."""
+    rc = build_reaction_complex(_TNB, leaving_group="NO2")
+    # The ipso carbon the builder chose must be the doubly-activated one.
+    assert rc.central_atom - 1 == _doubly_activated_nitro_carbon(_TNB)
+    # The leaving atom is its nitro nitrogen, bonded to that ipso carbon.
+    assert rc.atoms.get_chemical_symbols()[rc.lg_atom - 1] == "N"
+    assert _distance(rc.atoms, rc.central_atom, rc.lg_atom) < 1.6
+    assert _count_neighbours(rc.atoms, rc.lg_atom, "O", cutoff=1.4) == 2
 
 
 def test_nitro_leaving_group_requires_a_nitro_group():

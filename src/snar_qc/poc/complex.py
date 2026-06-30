@@ -211,9 +211,17 @@ def _find_leaving_nitro(mol: "Mol") -> tuple[int, int]:
 def _activation_score(mol: "Mol", ipso_idx: int) -> int:
     """Crude S~N~Ar activation score for an ipso carbon.
 
-    Counts aromatic ring nitrogens and ortho/para nitro groups in the ipso carbon's
-    ring -- a rough proxy for how activated that position is, used only to disambiguate
-    which halide leaves when a substrate carries several.
+    Counts the activators that are **ortho or para to the ipso carbon** -- aromatic ring
+    nitrogens and ring-borne nitro / N-oxide substituents -- since only ortho/para
+    activators stabilise the anionic Meisenheimer intermediate (the developing negative
+    charge resonates onto the ortho/para positions); a meta activator does not, and the
+    ipso carbon's own substituent (the leaving group) is excluded. Position is read from
+    the ring's topological distance: ortho = 1, meta = 2, para = 3 bonds around the ring.
+
+    Used only to disambiguate which leaving group departs when a substrate carries several
+    equivalent-element candidates -- e.g. on 1,2,4-trinitrobenzene it selects the C1 nitro
+    (ortho *and* para to the other two nitros) over the C2/C4 nitros (one ortho/para
+    activator each), matching the kinetically favoured ipso position.
 
     Args:
         mol: The aryl-halide molecule.
@@ -227,18 +235,29 @@ def _activation_score(mol: "Mol", ipso_idx: int) -> int:
     if not rings:
         return 0
     ring = max(rings, key=len)
+    # ``AtomRings`` orders atoms by ring connectivity, so the topological distance around
+    # the cycle is the gap between positions (wrapping at the ring size).
+    size = len(ring)
+    position = {idx: i for i, idx in enumerate(ring)}
+    ipso_pos = position[ipso_idx]
     score = 0
     for idx in ring:
+        if idx == ipso_idx:
+            continue
+        gap = abs(position[idx] - ipso_pos)
+        ring_dist = min(gap, size - gap)
+        if ring_dist not in (1, 3):  # only ortho (1) and para (3) activate
+            continue
         atom = mol.GetAtomWithIdx(idx)
         if atom.GetSymbol() == "N" and atom.GetIsAromatic():
-            score += 2
+            score += 2  # ortho/para ring aza nitrogen
         for nbr in atom.GetNeighbors():
             if nbr.GetIdx() in ring:
                 continue
             if nbr.GetSymbol() == "N" and any(
                 b.GetSymbol() == "O" for b in nbr.GetNeighbors()
             ):
-                score += 1  # nitro / N-oxide substituent on the ring
+                score += 1  # ortho/para nitro / N-oxide substituent
     return score
 
 
