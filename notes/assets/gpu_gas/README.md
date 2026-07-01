@@ -19,8 +19,8 @@ gas TS opt+freq (geomeTRIC, analytic Hessian) → gas ArX/amine refs → ΔG‡(
 
 **Stack:** gpu4pyscf (CUDA wheels) + pyscf + geomeTRIC, xtb 6.7.1, env `gpuqc`, RTX 3050 Ti (4 GB).
 
-**Source:** `data/processed/gpu_dmso_gas`; input `data/external/lu74_full.csv` (internal,
-gitignored). The committed, publicly reproducible subset is `data/external/lu74_solv_slice.csv`.
+**Source:** `data/processed/gpu_dmso_gas`; input `data/external/lu74_full.csv` (committed / public — the full 74-row
+literature Lu_74 set). A smaller `data/external/lu74_solv_slice.csv` slice is also committed.
 
 **Headline:** **69/74 completed.** Pooled ρ=0.52, r=0.46, MAE 13.92 (offset-corrected 4.18).
 Per-LG mean offset Br +11.2 / Cl +12.7 / **F +24.5** — the documented gas-phase fluoride

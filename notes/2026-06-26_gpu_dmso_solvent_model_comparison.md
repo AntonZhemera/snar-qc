@@ -15,8 +15,8 @@ stays a distinct, over-penalised cluster** in every model — exactly as flagged
 > Scope note (public/internal red line): this is **method characterisation** of the QC
 > tooling against the literature Lu_74 barriers — which engine/solvent model the tool should
 > use, and how well it ranks. It is not the project's own reactivity analysis. The full-cohort
-> ΔG‡ production run (`data/external/lu74_full.csv`, gitignored) is the research-adjacent part
-> and stays internal.
+> ΔG‡ production input (`data/external/lu74_full.csv`) is committed/public — the Lu_74 barriers
+> are literature-derived; the project's own *reactivity analysis* built on them stays internal.
 
 ## 1. Solvent-model comparison (GPU, 18-substrate slice)
 
@@ -114,8 +114,8 @@ but the amine can. Tracked as a follow-up, not blocking.
 ## 6. Next — full Lu_74 production
 
 Standard workflow decided (GPU + SMD/IEF-PCM), the remaining cohort can be computed. Input
-prepared at **`data/external/lu74_full.csv`** (74 rows, gitignored — research-adjacent, not a
-general tool): Cl 51 / Br 14 / F 9, exp ΔG‡ 14.67–22.85 kcal/mol. The 18-substrate slice is
+prepared at **`data/external/lu74_full.csv`** (74 rows, committed/public — literature-derived
+Lu_74 barriers): Cl 51 / Br 14 / F 9, exp ΔG‡ 14.67–22.85 kcal/mol. The 18-substrate slice is
 already done; **56 remain** (Cl 44 / Br 8 / F 4). At ~35 min/substrate for the gas backbone
 this is a ~30 h GPU campaign + cheap sweeps — a separate dispatched run, see the SOP
 (`docs/sop_snar_deltag.md`). Validate per-LG against the slice's offsets above.
