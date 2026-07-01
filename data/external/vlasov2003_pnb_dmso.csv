@@ -1,0 +1,7 @@
+substrate_id,smiles_canonical,leaving_group,name,nucleophile,amine_smiles,solvent,temp_C,exp_k_M1s1,exp_rel_rate_vs_Cl,exp_ddG_vs_Cl_kcal,exp_dG_abs_kcal_1M,source
+pnb_Cl_pip,O=[N+]([O-])c1ccc(Cl)cc1,Cl,"1-chloro-4-nitrobenzene",piperidine,C1CCNCC1,dmso,50,6.66e-5,1,0.00,25.1,"Vlasov2003_RusChemRev_72_681_Table11_entry1;primary_Suhr1964_ChemBer_97_3268"
+pnb_NO2_pip,O=[N+]([O-])c1ccc([N+](=O)[O-])cc1,NO2,"1,4-dinitrobenzene",piperidine,C1CCNCC1,dmso,50,5.79e-4,8.7,-1.39,23.8,"Vlasov2003_RusChemRev_72_681_Table11_entry1;primary_Suhr1964_ChemBer_97_3268"
+pnb_F_pip,O=[N+]([O-])c1ccc(F)cc1,F,"1-fluoro-4-nitrobenzene",piperidine,C1CCNCC1,dmso,50,2.74e-2,412,-3.87,21.3,"Vlasov2003_RusChemRev_72_681_Table11_entry1;primary_Suhr1964_ChemBer_97_3268"
+pnb_Cl_mea,O=[N+]([O-])c1ccc(Cl)cc1,Cl,"1-chloro-4-nitrobenzene",methylamine,CN,dmso,,,,,,"substrate_Vlasov2003_T11;model_amine_CN_no_exp_rate"
+pnb_NO2_mea,O=[N+]([O-])c1ccc([N+](=O)[O-])cc1,NO2,"1,4-dinitrobenzene",methylamine,CN,dmso,,,,,,"substrate_Vlasov2003_T11;model_amine_CN_no_exp_rate"
+pnb_F_mea,O=[N+]([O-])c1ccc(F)cc1,F,"1-fluoro-4-nitrobenzene",methylamine,CN,dmso,,,,,,"substrate_Vlasov2003_T11;model_amine_CN_no_exp_rate"
