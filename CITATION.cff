@@ -6,7 +6,7 @@ authors:
     given-names: Anton
     email: anton.zhemera@gmail.com
     affiliation: "Taras Shevchenko National University of Kyiv"
-version: 0.2.0
-date-released: 2026-06-22
+version: 0.4.0
+date-released: 2026-06-26
 license: Apache-2.0
 repository-code: "https://github.com/AntonZhemera/snar-qc"
