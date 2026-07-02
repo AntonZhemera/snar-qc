@@ -1,0 +1,43 @@
+{
+  "metric_column": "delta_g_qh_kcal",
+  "n_substrates_total": 74,
+  "n_completed": 5,
+  "completed_lu_ids": [
+    10,
+    20,
+    21,
+    36,
+    53
+  ],
+  "pearson_r": 0.9322,
+  "pearson_p": 0.021,
+  "spearman_r": 0.9,
+  "spearman_p": 0.0374,
+  "mae_kcal": 5.812,
+  "mean_offset_kcal": 5.812,
+  "mae_offset_corrected_kcal": 0.92,
+  "computed_range_kcal": [
+    20.35,
+    28.58
+  ],
+  "exp_range_kcal": [
+    16.55,
+    20.93
+  ],
+  "by_leaving_group": {
+    "Br": {
+      "n": 1,
+      "note": "too few for r"
+    },
+    "Cl": {
+      "n": 4,
+      "spearman_r": 1.0,
+      "pearson_r": 0.9391,
+      "ols_slope": 1.1998,
+      "ols_intercept": 1.6321,
+      "r_squared": 0.8819,
+      "mean_offset_kcal": 5.257,
+      "mae_offset_corrected_kcal": 0.729
+    }
+  }
+}

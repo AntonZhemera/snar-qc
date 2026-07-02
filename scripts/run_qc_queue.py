@@ -315,6 +315,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--log-file", default=None, help="mirror output here (default <archive-dir>/run.log)"
     )
     ap.add_argument("--solvent", default=None, help="PCMSolver solvent (e.g. DMSO); omit for gas")
+    ap.add_argument(
+        "--solvent-model",
+        default=None,
+        help="continuum model: iefpcm (default) or smd (GPU backend only). "
+        "Omit to use the backend default.",
+    )
     ap.add_argument("--coordinate", choices=("concerted", "addition"), default="concerted")
     ap.add_argument("--amine", default=None, help="model amine SMILES (default CN)")
     ap.add_argument("--workers", default="auto", help="int or 'auto'")
@@ -353,6 +359,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         retry=args.retry,
         force=args.force,
     )
+    if args.solvent_model:
+        cfg_kwargs["solvent_model"] = args.solvent_model
     if args.amine:
         cfg_kwargs["amine"] = args.amine
     cfg = WorkerConfig(**cfg_kwargs)
@@ -369,7 +377,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     emitter.emit(
         f"QC queue: {len(rows)} substrates | {workers} workers x {threads} threads "
-        f"({mem_gb:g} GB each) | solvent={args.solvent or 'gas'} | "
+        f"({mem_gb:g} GB each) | solvent={args.solvent or 'gas'}"
+        f"{('/' + args.solvent_model) if (args.solvent and args.solvent_model) else ''} | "
         f"coordinate={args.coordinate}\n"
         f"  outdir : {outdir}\n"
         f"  archive: {archive_dir or '(none)'}\n"

@@ -39,6 +39,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # Halogen elements that can act as the S~N~Ar leaving group, by symbol.
 _HALOGENS = ("F", "Cl", "Br", "I")
 
+# Leaving-group selector tokens for *ipso* nitro displacement: when ``leaving_group`` is
+# one of these (case-insensitive), the builder locates an aromatic-carbon-bound nitro
+# group instead of a halide and treats the nitro **nitrogen** as the leaving atom (the
+# group departs as nitrite, NO2-). Recorded on the complex as the symbol ``"NO2"``.
+_NITRO_TOKENS = frozenset({"NO2", "NITRO"})
+_NITRO_SYMBOL = "NO2"
+
 # Default neutral model nucleophile: methylamine (CH3-NH2). Its single nitrogen is the
 # nucleophilic atom. Used for the whole POC so 4a and 4b share one nucleophile.
 DEFAULT_AMINE_SMILES = "CN"
@@ -57,10 +64,13 @@ class ReactionComplex:
             amine atoms), carrying the total charge in ``atoms.info["charge"]``.
         central_atom: 1-indexed ipso aromatic carbon (the S~N~Ar reaction centre).
         nu_atom: 1-indexed nucleophilic nitrogen of the amine.
-        lg_atom: 1-indexed leaving halide.
+        lg_atom: 1-indexed leaving atom -- the halide for halide departure, or the nitro
+            **nitrogen** for ipso nitro displacement (nitrite leaves; its C-N bond is the
+            one the scan elongates).
         aryl_halide_smiles: The source aryl-halide SMILES.
         amine_smiles: The source amine SMILES.
-        leaving_group: Element symbol of the leaving halide ("F" / "Cl" / "Br" / "I").
+        leaving_group: Symbol of the leaving group: a halide ("F"/"Cl"/"Br"/"I") or
+            ``"NO2"`` for ipso nitro displacement.
     """
 
     atoms: Atoms
@@ -148,12 +158,70 @@ def _find_leaving_halide(mol: "Mol", leaving_group: Optional[str]) -> tuple[int,
     return halide_idx, ipso_idx
 
 
+def _find_leaving_nitro(mol: "Mol") -> tuple[int, int]:
+    """Locate an *ipso* nitro group's nitrogen and its aromatic carbon.
+
+    In ipso S~N~Ar a ring nitro group departs as nitrite (NO2-), so the leaving atom
+    handed to the scan engine is the nitro **nitrogen** -- the single atom bonded to the
+    ipso aromatic carbon, whose C-N bond the relaxed scan elongates as nitrite leaves
+    (mirroring how the C-halide bond is elongated for halide departure). A nitro nitrogen
+    is identified structurally: a nitrogen bonded to exactly two oxygens and one aromatic
+    carbon (the ipso). When more than one ipso nitro group is present, the one on the most
+    activated ring carbon is chosen (the same ``_activation_score`` proxy used for the
+    halide search); ties break on the lowest nitrogen index for determinism.
+
+    Args:
+        mol: An embedded aryl-nitro molecule.
+
+    Returns:
+        ``(nitro_nitrogen_index, ipso_index)`` as 0-indexed atom indices.
+
+    Raises:
+        ValueError: If no aromatic-carbon-bound nitro group is found.
+    """
+    candidates: list[tuple[int, int, int]] = []  # (activation, nitro_n_idx, ipso_idx)
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol() != "N":
+            continue
+        neighbors = atom.GetNeighbors()
+        oxygens = [nbr for nbr in neighbors if nbr.GetSymbol() == "O"]
+        aromatic_carbons = [
+            nbr for nbr in neighbors if nbr.GetSymbol() == "C" and nbr.GetIsAromatic()
+        ]
+        # A nitro group: N with two O's and a single aromatic-carbon (ipso) attachment.
+        if len(oxygens) != 2 or len(aromatic_carbons) != 1:
+            continue
+        ipso = aromatic_carbons[0]
+        candidates.append(
+            (_activation_score(mol, ipso.GetIdx()), atom.GetIdx(), ipso.GetIdx())
+        )
+
+    if not candidates:
+        raise ValueError(
+            "No ipso nitro group (a nitro on an aromatic carbon) found in "
+            f"{Chem.MolToSmiles(mol)!r}."
+        )
+
+    # Most activated ipso first; break ties on lowest nitrogen index.
+    candidates.sort(key=lambda c: (-c[0], c[1]))
+    _, nitro_idx, ipso_idx = candidates[0]
+    return nitro_idx, ipso_idx
+
+
 def _activation_score(mol: "Mol", ipso_idx: int) -> int:
     """Crude S~N~Ar activation score for an ipso carbon.
 
-    Counts aromatic ring nitrogens and ortho/para nitro groups in the ipso carbon's
-    ring -- a rough proxy for how activated that position is, used only to disambiguate
-    which halide leaves when a substrate carries several.
+    Counts the activators that are **ortho or para to the ipso carbon** -- aromatic ring
+    nitrogens and ring-borne nitro / N-oxide substituents -- since only ortho/para
+    activators stabilise the anionic Meisenheimer intermediate (the developing negative
+    charge resonates onto the ortho/para positions); a meta activator does not, and the
+    ipso carbon's own substituent (the leaving group) is excluded. Position is read from
+    the ring's topological distance: ortho = 1, meta = 2, para = 3 bonds around the ring.
+
+    Used only to disambiguate which leaving group departs when a substrate carries several
+    equivalent-element candidates -- e.g. on 1,2,4-trinitrobenzene it selects the C1 nitro
+    (ortho *and* para to the other two nitros) over the C2/C4 nitros (one ortho/para
+    activator each), matching the kinetically favoured ipso position.
 
     Args:
         mol: The aryl-halide molecule.
@@ -167,18 +235,29 @@ def _activation_score(mol: "Mol", ipso_idx: int) -> int:
     if not rings:
         return 0
     ring = max(rings, key=len)
+    # ``AtomRings`` orders atoms by ring connectivity, so the topological distance around
+    # the cycle is the gap between positions (wrapping at the ring size).
+    size = len(ring)
+    position = {idx: i for i, idx in enumerate(ring)}
+    ipso_pos = position[ipso_idx]
     score = 0
     for idx in ring:
+        if idx == ipso_idx:
+            continue
+        gap = abs(position[idx] - ipso_pos)
+        ring_dist = min(gap, size - gap)
+        if ring_dist not in (1, 3):  # only ortho (1) and para (3) activate
+            continue
         atom = mol.GetAtomWithIdx(idx)
         if atom.GetSymbol() == "N" and atom.GetIsAromatic():
-            score += 2
+            score += 2  # ortho/para ring aza nitrogen
         for nbr in atom.GetNeighbors():
             if nbr.GetIdx() in ring:
                 continue
             if nbr.GetSymbol() == "N" and any(
                 b.GetSymbol() == "O" for b in nbr.GetNeighbors()
             ):
-                score += 1  # nitro / N-oxide substituent on the ring
+                score += 1  # ortho/para nitro / N-oxide substituent
     return score
 
 
@@ -275,8 +354,11 @@ def build_reaction_complex(
     Args:
         aryl_halide_smiles: SMILES of the aryl halide (the S~N~Ar electrophile).
         amine_smiles: SMILES of the neutral amine nucleophile (default methylamine).
-        leaving_group: Element symbol of the leaving halide ("F"/"Cl"/"Br"/"I"); if
-            ``None``, the only / most activated aromatic halide is chosen.
+        leaving_group: Symbol of the leaving group. A halide element ("F"/"Cl"/"Br"/"I")
+            selects halide departure (``None`` picks the only / most activated aromatic
+            halide). ``"NO2"`` (or ``"nitro"``, case-insensitive) selects ipso nitro
+            displacement: an aromatic-carbon-bound nitro group is located and its nitrogen
+            becomes the leaving atom (the group departs as nitrite).
         approach: Initial N...C(ipso) distance in Angstrom.
         seed: Random seed for the deterministic 3D embeddings.
 
@@ -285,8 +367,8 @@ def build_reaction_complex(
         1-indexed central / nu / lg atom indices.
 
     Raises:
-        ValueError: If either SMILES cannot be parsed, no leaving halide is found, or
-            the amine has no nitrogen.
+        ValueError: If either SMILES cannot be parsed, no leaving group of the requested
+            kind is found (halide or ipso nitro), or the amine has no nitrogen.
     """
     aryl = Chem.MolFromSmiles(aryl_halide_smiles)
     if aryl is None:
@@ -298,8 +380,13 @@ def build_reaction_complex(
     aryl = _embed(aryl, seed=seed)
     amine = _embed(amine, seed=seed)
 
-    halide_idx, ipso_idx = _find_leaving_halide(aryl, leaving_group)
-    lg_symbol = aryl.GetAtomWithIdx(halide_idx).GetSymbol()
+    # Halide departure (default) vs ipso nitro displacement (leaving_group "NO2"/"nitro").
+    if leaving_group and leaving_group.strip().upper() in _NITRO_TOKENS:
+        lg_idx, ipso_idx = _find_leaving_nitro(aryl)
+        lg_symbol = _NITRO_SYMBOL
+    else:
+        lg_idx, ipso_idx = _find_leaving_halide(aryl, leaving_group)
+        lg_symbol = aryl.GetAtomWithIdx(lg_idx).GetSymbol()
     nu_idx = _nucleophile_nitrogen(amine)
 
     aryl_symbols, aryl_pos = _to_ase(aryl)
@@ -338,7 +425,7 @@ def build_reaction_complex(
         atoms=atoms,
         central_atom=ipso_idx + 1,
         nu_atom=n_aryl + nu_idx + 1,
-        lg_atom=halide_idx + 1,
+        lg_atom=lg_idx + 1,
         aryl_halide_smiles=aryl_halide_smiles,
         amine_smiles=amine_smiles,
         leaving_group=lg_symbol,

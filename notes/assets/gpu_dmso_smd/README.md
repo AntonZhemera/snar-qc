@@ -18,8 +18,8 @@ points on gas geometries** (gas Hessian). Same pipeline as `../gpu_dmso_iefpcm/`
 
 **Stack:** gpu4pyscf (CUDA wheels) + pyscf + geomeTRIC, xtb 6.7.1, env `gpuqc`, RTX 3050 Ti (4 GB).
 
-**Source:** `data/processed/gpu_dmso_smd`; input `data/external/lu74_full.csv` (internal,
-gitignored). The committed, publicly reproducible subset is `data/external/lu74_solv_slice.csv`.
+**Source:** `data/processed/gpu_dmso_smd`; input `data/external/lu74_full.csv` (committed / public — the full 74-row
+literature Lu_74 set). A smaller `data/external/lu74_solv_slice.csv` slice is also committed.
 
 **Headline — best single model.** **69/74 completed.** Pooled ρ=**0.82**, r=0.81, MAE **5.95**
 (offset-corrected 1.88) — best of the three on every metric. Per-LG mean offset Br +5.07 /

@@ -8,7 +8,13 @@ normal, and keeps the engine's 1-indexed atom contract self-consistent.
 import numpy as np
 import pytest
 
-from snar_qc.poc.complex import build_molecule, build_reaction_complex
+from rdkit import Chem
+
+from snar_qc.poc.complex import (
+    _activation_score,
+    build_molecule,
+    build_reaction_complex,
+)
 
 
 def _distance(atoms, i_one_indexed, j_one_indexed):
@@ -70,6 +76,124 @@ def test_charge_is_neutral_and_geometry_finite():
     rc = build_reaction_complex("N#Cc1ccc(F)cc1", leaving_group="F")
     assert rc.atoms.info["charge"] == 0
     assert np.all(np.isfinite(rc.atoms.get_positions()))
+
+
+def _count_neighbours(atoms, centre_one_indexed, symbol, cutoff):
+    """Number of atoms of ``symbol`` within ``cutoff`` Angstrom of a 1-indexed atom."""
+    centre = atoms.get_positions()[centre_one_indexed - 1]
+    symbols = atoms.get_chemical_symbols()
+    positions = atoms.get_positions()
+    count = 0
+    for i, sym in enumerate(symbols):
+        if i == centre_one_indexed - 1 or sym != symbol:
+            continue
+        if float(np.linalg.norm(positions[i] - centre)) <= cutoff:
+            count += 1
+    return count
+
+
+# 2-chloro-4-nitropyridine: the ipso-S~N~Ar probe substrate. C2 bears Cl (Path A), C4
+# bears NO2 (Path B); the two pathways must resolve to *different* ipso carbons.
+_NITROPYRIDINE = "Clc1nccc([N+](=O)[O-])c1"
+
+
+def test_nitro_leaving_group_selects_nitrogen_and_ipso_carbon():
+    """leaving_group='NO2' picks the nitro N as LG and its aromatic carbon as ipso."""
+    rc = build_reaction_complex(_NITROPYRIDINE, leaving_group="NO2")
+
+    symbols = rc.atoms.get_chemical_symbols()
+    # The leaving atom is the nitro nitrogen; the ipso is an aromatic carbon; Nu is N.
+    assert symbols[rc.lg_atom - 1] == "N"
+    assert symbols[rc.central_atom - 1] == "C"
+    assert symbols[rc.nu_atom - 1] == "N"
+    assert rc.leaving_group == "NO2"
+
+    # The leaving nitrogen is bonded to the ipso carbon (within a C-N bond length) ...
+    assert _distance(rc.atoms, rc.central_atom, rc.lg_atom) < 1.6
+    # ... and carries the two nitro oxygens (so it really is a nitro nitrogen).
+    assert _count_neighbours(rc.atoms, rc.lg_atom, "O", cutoff=1.4) == 2
+    assert rc.atoms.info["charge"] == 0
+
+
+def test_nitro_token_is_case_insensitive():
+    """'nitro' selects the same nitro-displacement site as 'NO2'."""
+    rc_no2 = build_reaction_complex(_NITROPYRIDINE, leaving_group="NO2")
+    rc_nitro = build_reaction_complex(_NITROPYRIDINE, leaving_group="nitro")
+    assert rc_nitro.central_atom == rc_no2.central_atom
+    assert rc_nitro.lg_atom == rc_no2.lg_atom
+    assert rc_nitro.leaving_group == "NO2"
+
+
+def test_nitro_and_halide_paths_pick_different_ipso_carbons():
+    """On 2-Cl-4-NO2-pyridine, Path A (Cl) and Path B (NO2) target distinct carbons."""
+    rc_cl = build_reaction_complex(_NITROPYRIDINE, leaving_group="Cl")
+    rc_no2 = build_reaction_complex(_NITROPYRIDINE, leaving_group="NO2")
+
+    # Path A leaves chlorine; Path B leaves the nitro nitrogen.
+    assert rc_cl.atoms.get_chemical_symbols()[rc_cl.lg_atom - 1] == "Cl"
+    assert rc_no2.atoms.get_chemical_symbols()[rc_no2.lg_atom - 1] == "N"
+    # The two pathways attack different ring carbons (C2 vs C4) -- the crux of the probe.
+    assert rc_cl.central_atom != rc_no2.central_atom
+
+
+# 1,2,4-trinitrobenzene: the Senger 2012 nitro-leaving-group anchor. All three nitro
+# carbons score equally under a position-blind activator count, but only C1 is ortho
+# *and* para to the other two nitros -- the kinetically favoured ipso for nitrite loss.
+_TNB = "O=[N+]([O-])c1ccc([N+](=O)[O-])c([N+](=O)[O-])c1"
+
+
+def _doubly_activated_nitro_carbon(smiles):
+    """Heavy-atom index of the ring carbon with the most ortho/para nitro activators."""
+    mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+    ring = max(mol.GetRingInfo().AtomRings(), key=len)
+
+    def bears_nitro(idx):
+        atom = mol.GetAtomWithIdx(idx)
+        return any(
+            nbr.GetIdx() not in ring
+            and nbr.GetSymbol() == "N"
+            and any(b.GetSymbol() == "O" for b in nbr.GetNeighbors())
+            for nbr in atom.GetNeighbors()
+        )
+
+    nitro_carbons = [i for i in ring if bears_nitro(i)]
+    return max(nitro_carbons, key=lambda i: _activation_score(mol, i))
+
+
+def test_activation_score_is_ortho_para_aware_on_tnb():
+    """On TNB the C1 nitro (ortho+para to the other two) outscores the C2/C4 nitros."""
+    mol = Chem.AddHs(Chem.MolFromSmiles(_TNB))
+    ring = max(mol.GetRingInfo().AtomRings(), key=len)
+
+    def bears_nitro(idx):
+        atom = mol.GetAtomWithIdx(idx)
+        return any(
+            nbr.GetIdx() not in ring
+            and nbr.GetSymbol() == "N"
+            and any(b.GetSymbol() == "O" for b in nbr.GetNeighbors())
+            for nbr in atom.GetNeighbors()
+        )
+
+    scores = sorted(_activation_score(mol, i) for i in ring if bears_nitro(i))
+    # Two singly-activated carbons (C2, C4) and one doubly-activated (C1).
+    assert scores == [1, 1, 2]
+
+
+def test_nitro_leaving_group_picks_doubly_activated_carbon_on_tnb():
+    """build_reaction_complex(TNB, NO2) targets the doubly-activated C1, not a tie-break."""
+    rc = build_reaction_complex(_TNB, leaving_group="NO2")
+    # The ipso carbon the builder chose must be the doubly-activated one.
+    assert rc.central_atom - 1 == _doubly_activated_nitro_carbon(_TNB)
+    # The leaving atom is its nitro nitrogen, bonded to that ipso carbon.
+    assert rc.atoms.get_chemical_symbols()[rc.lg_atom - 1] == "N"
+    assert _distance(rc.atoms, rc.central_atom, rc.lg_atom) < 1.6
+    assert _count_neighbours(rc.atoms, rc.lg_atom, "O", cutoff=1.4) == 2
+
+
+def test_nitro_leaving_group_requires_a_nitro_group():
+    """Requesting NO2 on a substrate with no aromatic nitro raises a clear error."""
+    with pytest.raises(ValueError, match="nitro"):
+        build_reaction_complex("Clc1ccncc1", leaving_group="NO2")
 
 
 def test_build_molecule_reference_species():

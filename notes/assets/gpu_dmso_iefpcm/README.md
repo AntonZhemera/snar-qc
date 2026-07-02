@@ -21,8 +21,8 @@ scan SPs (PCM) → gas TS opt+freq (geomeTRIC, analytic Hessian) → gas ArX/ami
 
 **Stack:** gpu4pyscf (CUDA wheels) + pyscf + geomeTRIC, xtb 6.7.1, env `gpuqc`, RTX 3050 Ti (4 GB).
 
-**Source:** `data/processed/gpu_dmso_iefpcm`; input `data/external/lu74_full.csv` (internal,
-gitignored). The committed, publicly reproducible subset is `data/external/lu74_solv_slice.csv`.
+**Source:** `data/processed/gpu_dmso_iefpcm`; input `data/external/lu74_full.csv` (committed / public — the full 74-row
+literature Lu_74 set). A smaller `data/external/lu74_solv_slice.csv` slice is also committed.
 
 **Headline:** **69/74 completed.** Pooled ρ=0.76, r=0.76, MAE 7.29 (offset-corrected 2.13).
 Per-LG mean offset Br +5.98 / Cl +6.79 / **F +11.76**; within-LG R² Br 0.65 / Cl 0.69 / F 0.82.

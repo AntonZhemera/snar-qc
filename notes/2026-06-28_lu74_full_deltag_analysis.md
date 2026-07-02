@@ -125,3 +125,54 @@ are same-engine, same-recipe re-runs of the cached gas geometries — no cross-e
    calibrated ΔG‡ ranker a reactivity consumer applies across F/Cl/Br.
 5. **Guard against overfit.** With F n=9, confirm the per-LG calibration generalises
    (leave-one-out within F, or a held-out check) before treating the offsets as fixed.
+
+## Hard-failure recovery → 74/74 (2026-06-29)
+
+Next-step 2 is **done**: the **5 hard failures** are recovered and the united model is refit on
+the **full 74-substrate** cohort.
+
+**Why they were hard.** All 5 are large arylators (25–32 atoms: a bis-CF₃ arene, two
+CF₃-quinolines, a chloro-triazine-morpholine, a dimethoxy-chloroquinoline) that exceeded the
+4 GB GPU at the **analytic Hessian** of `ts_opt_freq` / `arx_opt_freq`. The per-substrate
+CuPy-pool-free fix helps *cumulative* OOM but not a single oversized Hessian, so a fresh solo-GPU
+retry still OOM'd on **all 5** (lu_10 at `arx_opt_freq`; 20/21/36/53 at `ts_opt_freq`) — as
+expected.
+
+**Recovery (CPU gas + GPU-SMD single point — the "hybrid SMD" recipe).** CPU/Psi4 has no VRAM
+limit, so the gas backbone (TS-opt + analytic Hessian) completes there; the barrier is then put
+on the **SMD** model with a **GPU SMD single point on the CPU geometry** (a single SCF, no
+Hessian — fits in 4 GB). This keeps all 74 on the **same SMD solvent model**. All 5 are clean
+first-order saddles (`n_imag_ts=1`):
+
+| lu_id | LG | ΔG‡(qh), DMSO SMD | (CPU IEF-PCM, for reference) |
+|---|---|---|---|
+| 20 | Cl | 20.35 | 22.83 |
+| 21 | Cl | 22.62 | 25.37 |
+| 36 | Cl | 24.12 | 25.44 |
+| 53 | Cl | 26.52 | 28.58 |
+| 10 | Br | 28.58 | 30.22 |
+
+(The SMD value runs ~1.3–2.8 kcal/mol below IEF-PCM — the solvent-model gap, and the reason the
+hybrid SMD path beats entering the 5 as raw `cpu_iefpcm` rows.)
+
+**Cross-engine spot-check.** The 5 keep a CPU geometry (Psi4 optking) rather than the GPU
+geometry (geomeTRIC) of the other 69. A matched check — **lu_23** (25-atom aryl chloride) run on
+both engines with SMD held fixed — gives **CPU-geom-SMD 22.31 vs GPU-geom-SMD 20.97 = ~1.3
+kcal/mol**, i.e. comparable to the model's own ~0.94 kcal/mol MAE.
+
+**Refit (74/74).** `source_model_counts = {smd: 69, cpu_geom_smd: 5}`. The calibration is
+essentially unchanged from the 69-row SMD model — completeness, not a correctness shift:
+
+| metric | 69/74 (SMD) | **74/74 (hybrid SMD)** |
+|---|---|---|
+| shared slope β | 1.53 | 1.53 |
+| calibrated MAE | 0.942 | **0.937** |
+| ranking ρ | 0.849 | 0.857 |
+| R² | 0.746 | 0.749 |
+| slope-choice F-test | F≈0.07, p≈0.93 | F≈0.05, **p≈0.95** (shared slope) |
+
+The partial F-test still favours the **shared-slope** model on the enlarged cohort (the 5 new
+rows are 1 Br + 4 Cl). Assets: `notes/assets/cpu_geom_smd/` (the 5) + refreshed
+`notes/assets/united_model/`. Run dirs (gitignored): `data/processed/cpu_hard_iefpcm/` (CPU gas
++ IEF-PCM), `data/processed/cpu_geom_smd/` (GPU-SMD SP), `data/processed/cpu_spotcheck{,_smd}/`
+(the lu_23 cross-engine check).

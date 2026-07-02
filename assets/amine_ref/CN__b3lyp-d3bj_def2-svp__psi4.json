@@ -1,0 +1,12 @@
+{
+  "amine_smiles": "CN",
+  "backend": "psi4",
+  "level": "b3lyp-d3bj_def2-svp",
+  "n_imag": 0,
+  "geometry": "CN__b3lyp-d3bj_def2-svp__psi4.xyz",
+  "electronic_energy": -95.78927719287782,
+  "gibbs": -95.74864636596004,
+  "gibbs_qh": -95.74864813901677,
+  "enthalpy": -95.72131222872993,
+  "zpve": 0.06361579374550794
+}

@@ -71,6 +71,7 @@ def _config(args: argparse.Namespace) -> WorkerConfig:
         coordinate=args.coordinate,
         retry=args.retry,
         force=args.force,
+        resume=args.resume,
     )
 
 
@@ -79,7 +80,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--smiles", help="single aryl-halide SMILES (ad-hoc smoke test)")
     src.add_argument("--substrates", help="CSV with smiles_canonical / leaving_group")
-    parser.add_argument("--leaving-group", help="leaving halide element for --smiles")
+    parser.add_argument(
+        "--leaving-group",
+        help="leaving group for --smiles: a halide element (F/Cl/Br/I) or NO2 for ipso "
+        "nitro displacement",
+    )
     parser.add_argument("--lu-id", type=int, help="optional id for --smiles")
     parser.add_argument("--only", help="comma-separated lu_id filter for --substrates")
     parser.add_argument(
@@ -116,6 +121,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--force", action="store_true", help="re-run all substrates from scratch"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="within a substrate, skip stages already checkpointed in its progress.json "
+        "(scan, TS opt+freq, ArX opt+freq) after an interrupted run; --force overrides",
     )
     args = parser.parse_args(argv)
 

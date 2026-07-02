@@ -35,9 +35,10 @@ snar-qc/
 ├── scripts/                # pipeline / batch scripts
 ├── tests/                  # pytest suite (TDD)
 ├── data/
-│   ├── raw/                # raw inputs (gitignored payloads)
-│   ├── processed/          # pipeline outputs (gitignored payloads)
-│   └── external/           # external reference sets (e.g. published validation data)
+│   ├── raw/                # raw inputs (gitignored; placeholder — currently unused)
+│   ├── processed/          # per-substrate QC run dirs (gitignored payloads)
+│   ├── external/           # external reference sets (e.g. published validation data)
+│   └── archive/            # per-run operational logs via --archive-dir (gitignored)
 ├── assets/                 # reaction-template (SMIRKS) catalogues, nucleophile definitions
 ├── notes/                  # dated interpretive notes, findings
 ├── plans/                  # work plans (active); plans/archive/ for completed
@@ -142,3 +143,23 @@ and to not misrepresent what was changed. Precedent: `snar-qc` `ab17da7` + `1ee7
 
 `data/` payloads are gitignored by default. Commit only small, shareable, curated tables —
 explicitly, once a consumer artefact stabilises. Never commit large or non-shareable data.
+
+The `data/` subdirectories:
+
+- `data/raw/` — raw inputs. A **placeholder**, currently unused (only `.gitkeep`); reserved for
+  raw payloads that would land before any processing. Gitignored.
+- `data/processed/` — per-substrate QC run directories (geometries, sidecars, gas caches) written
+  by the pipeline. Gitignored payloads; a stabilised *consumer* table may be force-added.
+- `data/external/` — external reference sets (published validation data, literature substrate
+  CSVs). Gitignored by default; the small, shareable, curated CSVs are force-added (`git add -f`).
+- `data/archive/` — **per-run operational logs** (`console.log`, `run.log`, per-substrate zips)
+  written when a run passes `--archive-dir` (e.g. `scripts/run_qc_queue.py`). Pure run-time
+  bookkeeping, **never a deliverable** — gitignored like `raw`/`processed`, never committed.
+
+## Versioning
+
+Plain [semver](https://semver.org/) in the `VERSION` file, which is the **single source of
+truth**. `pyproject.toml` and `CITATION.cff` mirror it and must be kept in sync — on every
+version bump, update all three in the same change (a `chore(release): sync pyproject + CITATION
+to VERSION <x.y.z>` commit, mirroring precedent `e4aae4d`). Do not let them diverge; if they
+have, `VERSION` wins and the other two are corrected up to it.
