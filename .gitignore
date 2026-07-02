@@ -32,13 +32,14 @@ dist/
 # Claude Code (local-only permissions and session state)
 .claude/
 
-# Data — raw / processed / external payloads are NOT tracked by default.
+# Data — raw / processed / external / archive payloads are NOT tracked by default.
 # Never commit large or non-shareable data. Track only small, shareable curated
 # tables, explicitly, once a consumer artefact stabilises (git add -f or a
-# narrower un-ignore rule).
+# narrower un-ignore rule). archive/ is per-run operational logs, never a deliverable.
 data/raw/*
 data/processed/*
 data/external/*
+data/archive/*
 !data/**/.gitkeep
 
 # Quantum-chemistry + TS-search scratch (Psi4 / ORCA / xTB / autodE)
